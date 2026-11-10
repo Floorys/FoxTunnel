@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FoxTunnel</title>
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="popup">
+  <header class="brand">
+    <img src="icons/tunnel.svg" alt="" width="36" height="36">
+    <div><strong>FoxTunnel</strong><span>sing-box · Firefox</span></div>
+    <button id="settings" class="quiet" title="Открыть настройки">Настройки</button>
+  </header>
+  <main>
+    <div class="connection"><span id="statusDot" class="dot"></span><h1 id="status">Загрузка…</h1></div>
+    <p id="detail" class="muted"></p>
+    <label for="profile">Подключение</label><select id="profile"></select>
+    <label for="mode">Маршрутизация</label>
+    <select id="mode">
+      <option value="rules">По правилам доменов</option>
+      <option value="global">Весь веб-трафик *</option>
+    </select>
+    <div id="routeWarning" class="warn-box" hidden>
+      <p>Нет активных VPN-правил — сейчас сайты идут напрямую.</p>
+      <button id="switchGlobal" class="quiet">Переключить на весь трафик</button>
+    </div>
+    <button id="toggle" class="primary full">Подключить</button>
+    <button id="probe" class="quiet full">Проверить доступность конфига</button>
+    <button id="refreshSubs" class="quiet full" hidden>Обновить подписки</button>
+    <p id="probeLine" class="probe-line" aria-live="polite"></p>
+    <p id="error" class="error" role="alert"></p>
+    <p class="fine">* Исключения и правила продолжают действовать. Системный трафик не затрагивается.</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

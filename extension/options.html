@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FoxTunnel — настройки</title>
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <div class="brand">
+        <img src="icons/tunnel.svg" width="44" height="44" alt="">
+        <div><strong>FoxTunnel</strong><span>VPN в Firefox, без системного туннеля</span></div>
+      </div>
+      <div class="header-right">
+        <p id="connectionStatus" class="muted">Загрузка…</p>
+        <button id="themeToggle" class="quiet" title="Переключить тему">Тема: Авто</button>
+      </div>
+    </header>
+    <div id="killSwitchBanner" class="banner-error" hidden role="alert">
+      <p id="killSwitchError"></p>
+      <button id="recoverDisconnect">Отключить kill switch и вернуть прямой трафик</button>
+    </div>
+    <div id="toast" class="toast" hidden role="status"></div>
+    <div class="layout">
+      <nav aria-label="Разделы">
+        <button data-tab="profiles" aria-selected="true">Подключения</button>
+        <button data-tab="routing" aria-selected="false">Маршрутизация</button>
+        <button data-tab="security" aria-selected="false">Сеть и защита</button>
+        <button data-tab="tools" aria-selected="false">Диагностика</button>
+      </nav>
+      <main>
+        <section data-panel="profiles">
+          <div class="panel">
+            <div class="panel-head">
+              <h1>Подключения</h1>
+              <div class="actions">
+                <button id="probeAll">Проверить все</button>
+                <button id="stopProbeAll" hidden>Остановить проверку</button>
+              </div>
+            </div>
+            <p class="muted">Импортируйте ссылку сервера или текст подписки. Кнопка «Проверить» запускает временный туннель sing-box и проверяет реальный HTTPS-отклик конфига (не просто TCP-пинг).</p>
+            <div id="profiles" class="list"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Подписки</h2>
+              <div class="actions">
+                <button id="refreshAllSubs">Обновить все</button>
+              </div>
+            </div>
+            <label class="check"><input type="checkbox" id="subscriptionAutoUpdate">Автоматически обновлять сохранённые подписки при запуске и раз в 24 часа (через текущий маршрут браузера).</label>
+            <div id="subscriptions" class="list"></div>
+          </div>
+          <div class="panel">
+            <h2>Импорт ссылок</h2>
+            <p class="fine">VLESS, VMess (base64 JSON), Hysteria2 / hy2, Trojan, Shadowsocks, TUIC, AnyTLS, SOCKS и HTTP. При ошибке импорт отменяется целиком.</p>
+            <label for="links">Ссылки или base64-подписка</label>
+            <textarea id="links" class="mono" rows="5" placeholder="vless://…&#10;hy2://…" spellcheck="false"></textarea>
+            <div class="actions">
+              <button id="importLinks" class="primary">Добавить профили</button>
+              <button id="importFile">Из текстового файла</button>
+              <input id="linksFile" type="file" accept=".txt,.conf" hidden>
+            </div>
+            <label for="subscriptionUrl">URL подписки (HTTPS)</label>
+            <input id="subscriptionUrl" type="url" placeholder="https://provider.example/subscription/…" autocomplete="off">
+            <label for="subscriptionName">Название подписки (необязательно)</label>
+            <input id="subscriptionName" maxlength="160" placeholder="Определится автоматически, если не указано">
+            <label class="check"><input type="checkbox" id="saveSubscription" checked>Сохранить подписку для дальнейших обновлений (старые серверы подписки будут заменяться новыми)</label>
+            <div class="actions"><button id="fetchSubscription">Загрузить подписку</button></div>
+            <p class="fine">URL подписки обычно содержит секретный токен: сохранённые подписки хранятся локально в открытом виде и попадают в JSON-резервную копию. Загрузка идёт через текущий маршрут браузера без редиректов.</p>
+          </div>
+          <div class="panel">
+            <h2 id="editorTitle">Профиль вручную</h2>
+            <p class="muted">Это один объект outbound sing-box, не полный конфиг Xray. TLS, Reality, WebSocket, gRPC, multiplex и параметры протокола редактируются здесь.</p>
+            <label for="profileName">Название</label>
+            <input id="profileName" maxlength="160" placeholder="Мой сервер">
+            <label for="outbound">JSON outbound</label>
+            <textarea id="outbound" class="mono" rows="14" spellcheck="false" placeholder='{"type":"vless","server":"server.example","server_port":443,"uuid":"…","tls":{"enabled":true}}'></textarea>
+            <div class="actions">
+              <button id="saveProfile" class="primary">Сохранить профиль</button>
+              <button id="checkProfile">Проверить ядром</button>
+              <button id="probeEditor">Проверить связь</button>
+              <button id="resetEditor">Очистить редактор</button>
+            </div>
+            <p id="editorProbeLine" class="probe-line" aria-live="polite"></p>
+            <p class="fine">«Проверить ядром» проверяет синтаксис, а «Проверить связь» поднимает тестовое соединение к серверу. Пути к локальным файлам и detour в профиле запрещены. <a href="https://sing-box.sagernet.org/configuration/outbound/" target="_blank" rel="noreferrer">Документация outbound</a></p>
+          </div>
+        </section>
+
+        <section data-panel="routing" hidden>
+          <div class="panel">
+            <h1>Маршрутизация</h1>
+            <p class="muted">Правила проверяются сверху вниз. Первое совпадение побеждает. Домен ресурса, а не открытой вкладки, определяет маршрут: CDN и поддомены нужно учитывать отдельно.</p>
+            <div class="columns">
+              <div>
+                <label for="mode">Режим</label>
+                <select id="mode">
+                  <option value="rules">По правилам</option>
+                  <option value="global">Весь веб-трафик</option>
+                </select>
+              </div>
+              <div>
+                <label for="defaultAction">Без совпавшего правила</label>
+                <select id="defaultAction">
+                  <option value="direct">Напрямую</option>
+                  <option value="proxy">Через VPN</option>
+                  <option value="block">Блокировать</option>
+                </select>
+              </div>
+            </div>
+            <p class="fine">В режиме «Весь веб-трафик» маршрут по умолчанию — VPN; ваши правила и исключения локальной сети всё равно действуют.</p>
+            <label class="check"><input type="checkbox" id="bypassLocal">Не проксировать localhost, частные IP, .local и однословные имена. Домен, разрешающийся в частный IP, автоматически не распознаётся.</label>
+            <div id="rules" class="list"></div>
+            <h2 style="margin-top:24px">Добавить правило</h2>
+            <div class="columns">
+              <div>
+                <label for="ruleKind">Совпадение</label>
+                <select id="ruleKind">
+                  <option value="suffix">Домен и поддомены</option>
+                  <option value="domain">Точный домен</option>
+                  <option value="keyword">Подстрока в домене</option>
+                </select>
+              </div>
+              <div>
+                <label for="ruleAction">Действие</label>
+                <select id="ruleAction">
+                  <option value="proxy">VPN</option>
+                  <option value="direct">Напрямую</option>
+                  <option value="block">Блокировать</option>
+                </select>
+              </div>
+            </div>
+            <label for="ruleValue">Домен или подстрока</label>
+            <input id="ruleValue" placeholder="example.com">
+            <div class="actions"><button id="addRule">Добавить правило</button></div>
+            <div class="savebar">
+              <p id="routingStatus" class="fine">Изменения правил применяются после сохранения.</p>
+              <button id="saveRouting" class="primary">Сохранить маршруты</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>Проверить маршрут</h2>
+            <p class="fine">Проверяется сохранённая конфигурация, без сетевого запроса. При отключённом VPN все маршруты временно не действуют.</p>
+            <label for="testUrl">URL</label>
+            <div class="row">
+              <input id="testUrl" type="url" placeholder="https://example.com/page">
+              <button id="testRoute">Проверить</button>
+            </div>
+            <p id="routeResult"></p>
+          </div>
+        </section>
+
+        <section data-panel="security" hidden>
+          <div class="panel">
+            <h1>Сеть и защита</h1>
+            <p class="notice">Это VPN для доступного WebExtensions веб-трафика, не системный VPN. Firefox-службы, защищённые страницы, другие приложения и уже открытые соединения не покрываются гарантированно.</p>
+            <label class="check"><input type="checkbox" id="killSwitch">Kill switch: не переходить на прямое соединение при ошибке ядра. Действует только для запросов, которым назначен VPN; прямые исключения остаются прямыми.</label>
+            <label class="check"><input type="checkbox" id="protectWebRTC">Ограничить непроксируемый UDP в WebRTC, чтобы уменьшить риск утечки IP. Голосовые и видеозвонки могут перестать работать.</label>
+            <label class="check"><input type="checkbox" id="autoConnect">Подключаться при каждом запуске Firefox. Независимо от этого, активное подключение предыдущей сессии восстанавливается.</label>
+            <p class="fine">При активном клиенте отключается предзагрузка сети. При ручном отключении Firefox получает назад прежние настройки приватности. Перезагрузите вкладки после смены маршрута; для чувствительных сессий закройте старые вкладки/соединения.</p>
+            <div class="columns">
+              <div>
+                <label for="port">Локальный SOCKS-порт</label>
+                <input id="port" type="number" min="1024" max="65535">
+              </div>
+              <div>
+                <label for="logLevel">Уровень журнала ядра</label>
+                <select id="logLevel">
+                  <option value="error">Только ошибки</option>
+                  <option value="warn">Предупреждения</option>
+                  <option value="info">Информация</option>
+                  <option value="debug">Отладка</option>
+                  <option value="trace">Подробная трассировка</option>
+                </select>
+              </div>
+            </div>
+            <div class="columns">
+              <div>
+                <label for="theme">Тема оформления</label>
+                <select id="theme">
+                  <option value="system">Авто (как в системе)</option>
+                  <option value="light">Светлая</option>
+                  <option value="dark">Тёмная</option>
+                </select>
+              </div>
+              <div>
+                <label for="probeUrl">URL для проверки доступности</label>
+                <input id="probeUrl" type="url" placeholder="https://cp.cloudflare.com/generate_204">
+              </div>
+            </div>
+            <label for="dnsMode">DNS для VPN-назначений</label>
+            <select id="dnsMode">
+              <option value="remote">Передавать домен серверу (SOCKS5 proxyDNS)</option>
+              <option value="doh">Разрешать в ядре через DoH внутри VPN</option>
+            </select>
+            <div id="dohFields">
+              <div class="columns">
+                <div><label for="dnsServer">IP DoH-сервера</label><input id="dnsServer" placeholder="1.1.1.1"></div>
+                <div><label for="dnsServerName">TLS Server Name</label><input id="dnsServerName" placeholder="cloudflare-dns.com"></div>
+              </div>
+              <label for="dnsPath">Путь запроса</label>
+              <input id="dnsPath" placeholder="/dns-query">
+            </div>
+            <p class="fine">Прямые правила используют DNS Firefox/системы. Имя самого VPN-сервера разрешается системным DNS (bootstrap) до установления туннеля; используйте IP сервера и TLS SNI, чтобы уменьшить bootstrap-утечку. Hysteria2 использует UDP между ядром и сервером, но Firefox общается с ядром по SOCKS5/TCP.</p>
+            <div class="savebar">
+              <p id="securityStatus" class="fine">Изменения ядра перезапустят активный процесс; смена темы применяется без разрыва.</p>
+              <button id="saveSecurity" class="primary">Сохранить настройки</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>Резервная копия</h2>
+            <p class="error">Профили, резервные копии (JSON backup), Firefox storage и временный конфиг ядра содержат пароли/UUID. Они хранятся локально, не шифруются и не синхронизируются. Не публикуйте эти файлы.</p>
+            <div class="actions">
+              <button id="exportBackup">Экспорт JSON</button>
+              <button id="importBackup">Импорт JSON</button>
+              <input id="backupFile" type="file" accept=".json" hidden>
+            </div>
+          </div>
+        </section>
+
+        <section data-panel="tools" hidden>
+          <div class="panel">
+            <h1>Диагностика</h1>
+            <p class="muted">Нужны Python 3.10+ и установленный native host. Windows-установщик: <code>native/install.cmd</code> или <code>native/install.ps1</code>. Ядро не требует прав администратора.</p>
+            <div class="actions">
+              <button id="diagnostics">Проверить помощник</button>
+              <button id="connect" class="primary">Подключить / перезапустить</button>
+              <button id="disconnect">Отключить</button>
+            </div>
+            <pre id="diagnosticOutput" class="mono">Проверка ещё не выполнялась.</pre>
+          </div>
+          <div class="panel">
+            <h2>Журнал</h2>
+            <p class="fine">Журнал ядра может содержать домены и адреса. Размер ограничен; при каждом запуске ядра файл очищается.</p>
+            <div class="actions"><button id="getLogs">Обновить журнал ядра</button></div>
+            <pre id="coreLogs" class="mono">Нет данных.</pre>
+            <h2>События расширения</h2>
+            <pre id="events" class="mono"></pre>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script src="lib.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

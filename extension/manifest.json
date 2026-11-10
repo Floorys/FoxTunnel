@@ -1,0 +1,19 @@
+{
+  "manifest_version": 2,
+  "name": "FoxTunnel",
+  "version": "0.1.0",
+  "description": "Клиент sing-box для Firefox: VLESS, VMess, Hysteria2 и маршрутизация по доменам.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "foxtunnel@local",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  },
+  "permissions": ["storage", "proxy", "nativeMessaging", "privacy", "webRequest", "webRequestBlocking", "<all_urls>"],
+  "background": { "scripts": ["lib.js", "background.js"], "persistent": true },
+  "browser_action": { "default_title": "FoxTunnel", "default_popup": "popup.html", "default_icon": "icons/tunnel.svg" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "icons": { "48": "icons/tunnel.svg", "96": "icons/tunnel.svg" },
+  "content_security_policy": "script-src 'self'; object-src 'none'"
+}

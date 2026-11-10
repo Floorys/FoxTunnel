@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+dist/
+native/bin/
+native/host.cmd
+native/io.foxtunnel.host.json
+node_modules/
+.venv/

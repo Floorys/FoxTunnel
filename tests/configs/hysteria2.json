@@ -1,0 +1,34 @@
+{
+  "log": { "level": "warn", "timestamp": true },
+  "dns": {
+    "servers": [{ "type": "local", "tag": "bootstrap" }],
+    "final": "bootstrap"
+  },
+  "inbounds": [
+    { "type": "socks", "tag": "firefox", "listen": "127.0.0.1", "listen_port": 2080 }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "proxy",
+      "domain_resolver": "bootstrap",
+      "server": "hy2.example.invalid",
+      "server_port": 443,
+      "password": "test-placeholder-password",
+      "up_mbps": 50,
+      "down_mbps": 100,
+      "obfs": { "type": "salamander", "password": "test-obfs-placeholder" },
+      "tls": {
+        "enabled": true,
+        "server_name": "hy2.example.invalid",
+        "alpn": ["h3"]
+      }
+    }
+  ],
+  "route": {
+    "default_domain_resolver": "bootstrap",
+    "rules": [],
+    "final": "proxy"
+  }
+}
+

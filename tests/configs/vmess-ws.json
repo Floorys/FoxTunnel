@@ -1,0 +1,37 @@
+{
+  "log": { "level": "warn", "timestamp": true },
+  "dns": {
+    "servers": [{ "type": "local", "tag": "bootstrap" }],
+    "final": "bootstrap"
+  },
+  "inbounds": [
+    { "type": "socks", "tag": "firefox", "listen": "127.0.0.1", "listen_port": 2080 }
+  ],
+  "outbounds": [
+    {
+      "type": "vmess",
+      "tag": "proxy",
+      "domain_resolver": "bootstrap",
+      "server": "vmess.example.invalid",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "security": "auto",
+      "alter_id": 0,
+      "transport": {
+        "type": "ws",
+        "path": "/ws",
+        "headers": { "Host": "vmess.example.invalid" }
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "vmess.example.invalid"
+      }
+    }
+  ],
+  "route": {
+    "default_domain_resolver": "bootstrap",
+    "rules": [],
+    "final": "proxy"
+  }
+}
+

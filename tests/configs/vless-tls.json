@@ -1,0 +1,32 @@
+{
+  "log": { "level": "warn", "timestamp": true },
+  "dns": {
+    "servers": [{ "type": "local", "tag": "bootstrap" }],
+    "final": "bootstrap"
+  },
+  "inbounds": [
+    { "type": "socks", "tag": "firefox", "listen": "127.0.0.1", "listen_port": 2080 }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy",
+      "domain_resolver": "bootstrap",
+      "server": "vless.example.invalid",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "vless.example.invalid",
+        "alpn": ["h2", "http/1.1"]
+      }
+    }
+  ],
+  "route": {
+    "default_domain_resolver": "bootstrap",
+    "rules": [],
+    "final": "proxy"
+  }
+}
+
