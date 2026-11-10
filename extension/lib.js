@@ -6,10 +6,29 @@
   const FORBIDDEN_KEYS = new Set(["detour", "outbounds", "inbounds", "endpoints", "providers", "route", "dns", "experimental", "ntp", "log"]);
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+  const DEFAULT_GEO_SOURCE = () => ({
+    sourceType: "none",
+    url: "",
+    path: "",
+    fileName: "",
+    format: "",
+    updatedAt: "",
+    size: 0,
+    tagsCount: 0,
+    sampleTags: []
+  });
+
   const defaults = () => ({
     version: 1, profiles: [], selectedId: "", subscriptions: [], subscriptionAutoUpdate: false,
     mode: "rules", defaultAction: "direct",
-    rules: [], port: 2080, killSwitch: true, bypassLocal: true,
+    rules: [],
+    geo: {
+      geoip: DEFAULT_GEO_SOURCE(),
+      geosite: DEFAULT_GEO_SOURCE(),
+      ruleSets: [],
+      updateViaProxy: false
+    },
+    port: 2080, killSwitch: true, bypassLocal: true,
     protectWebRTC: true, autoConnect: false, logLevel: "warn", dnsMode: "remote",
     dnsServer: "1.1.1.1", dnsServerName: "cloudflare-dns.com", dnsPath: "/dns-query",
     theme: "system", probeUrl: "https://cp.cloudflare.com/generate_204"
@@ -415,14 +434,166 @@
     return u.hostname.replace(/\.$/, "");
   }
 
+  const CORE_RULE_KINDS = new Set(["cidr", "geoip", "geosite", "ruleset"]);
+
+  function normalizeCidr(input) {
+    const clean = String(input || "").trim();
+    if (!clean || /[\s\r\n\x00-\x1f]/.test(clean)) throw new Error("Некорректный CIDR-диапазон.");
+    const parts = clean.split("/");
+    if (parts.length > 2) throw new Error("Некорректный формат CIDR, используйте IP/маска.");
+    const ipRaw = unbracket(parts[0]);
+    if (!isValidIp(ipRaw)) throw new Error("Некорректный IP-адрес в CIDR-правиле.");
+    const isV6 = ipRaw.includes(":");
+    const ip = isV6 ? (parseIpv6(ipRaw) || ipRaw.toLowerCase()) : ipRaw;
+    let prefix = isV6 ? 128 : 32;
+    if (parts.length === 2) {
+      if (!/^\d{1,3}$/.test(parts[1])) throw new Error("Некорректная маска подсети в CIDR.");
+      prefix = Number(parts[1]);
+      if (prefix < 0 || prefix > (isV6 ? 128 : 32)) throw new Error("Маска подсети вне допустимого диапазона.");
+    }
+    return `${ip}/${prefix}`;
+  }
+
+  function normalizeGeoTag(input, kind) {
+    let raw = String(input || "").trim().toLowerCase();
+    if (kind === "geoip") {
+      raw = raw.replace(/^geoip:/i, "");
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(raw)) {
+        throw new Error("Тег GeoIP должен содержать только латиницу, цифры, '-' или '_' (например: ru, private, cloudflare).");
+      }
+      return raw;
+    }
+    if (kind === "geosite") {
+      raw = raw.replace(/^geosite:/i, "");
+      const parts = raw.split("@");
+      if (parts.length > 2 || !parts[0]) {
+        throw new Error("Некорректный тег Geosite (пример: youtube, category-ads-all или youtube@cn).");
+      }
+      if (!/^[a-z0-9][a-z0-9_!.-]{0,95}$/.test(parts[0])) {
+        throw new Error("Некорректное имя категории Geosite.");
+      }
+      if (parts.length === 2 && !/^!?[a-z0-9][a-z0-9_-]{0,31}$/.test(parts[1])) {
+        throw new Error("Некорректный атрибут Geosite после '@'.");
+      }
+      return parts.length === 2 ? `${parts[0]}@${parts[1]}` : parts[0];
+    }
+    raw = raw.replace(/^(?:ruleset|rule-set|rule_set):/i, "");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(raw)) {
+      throw new Error("Тег Rule-Set должен содержать только латиницу, цифры, '-' или '_'.");
+    }
+    return raw;
+  }
+
+  function validateGeoUrl(rawUrl) {
+    const clean = String(rawUrl || "").trim();
+    if (!clean) return "";
+    if (clean.length > 2048 || /[\s\r\n\x00-\x1f]/.test(clean)) {
+      throw new Error("Некорректный URL Geo-базы.");
+    }
+    let u;
+    try { u = new URL(clean); } catch { throw new Error("Некорректный URL Geo-базы."); }
+    if (u.protocol !== "https:") throw new Error("URL Geo-базы должен начинаться с https://.");
+    if (u.username || u.password) throw new Error("Удалите логин и пароль из URL Geo-базы.");
+    const host = unbracket(u.hostname.toLowerCase());
+    if (!host || isLocal(host)) throw new Error("Локальные адреса не допускаются для удалённого URL Geo-базы.");
+    return u.toString();
+  }
+
+  function validateGeoPath(rawPath) {
+    const clean = String(rawPath || "").trim().replace(/^["']|["']$/g, "");
+    if (!clean) return "";
+    if (clean.length > 512 || /[\r\n\x00-\x1f"<>|?*]/.test(clean)) {
+      throw new Error("Некорректный локальный путь к файлу Geo-базы.");
+    }
+    if (!/\.(dat|srs|json)$/i.test(clean)) {
+      throw new Error("Файл Geo-базы должен иметь расширение .dat, .srs или .json.");
+    }
+    return clean;
+  }
+
+  function detectGeoFormat(str, fallback = "") {
+    const clean = String(str || "").trim().split(/[?#]/)[0].toLowerCase();
+    if (clean.endsWith(".dat")) return "dat";
+    if (clean.endsWith(".srs")) return "srs";
+    if (clean.endsWith(".json")) return "json";
+    return fallback;
+  }
+
+  function validateGeoSource(raw, label) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const sourceType = ["none", "remote", "local"].includes(src.sourceType) ? src.sourceType : "none";
+    const url = validateGeoUrl(src.url || "");
+    const path = validateGeoPath(src.path || "");
+    const fileName = String(src.fileName || "").trim().slice(0, 200);
+    const detected = detectGeoFormat(sourceType === "remote" ? (path || url) : path, "");
+    const format = ["dat", "srs", "json"].includes(src.format) ? src.format : detected;
+    const updatedAt = typeof src.updatedAt === "string" ? src.updatedAt.slice(0, 64) : "";
+    const size = Number.isInteger(src.size) && src.size >= 0 ? src.size : 0;
+    const tagsCount = Number.isInteger(src.tagsCount) && src.tagsCount >= 0 ? src.tagsCount : 0;
+    const sampleTags = Array.isArray(src.sampleTags)
+      ? Array.from(new Set(src.sampleTags.map(t => String(t || "").trim().toLowerCase()).filter(Boolean))).slice(0, 200)
+      : [];
+    if (sourceType === "remote" && !url) throw new Error(`Укажите HTTPS-ссылку для ${label}.`);
+    if (sourceType === "local" && !path) throw new Error(`Укажите путь или выберите локальный файл для ${label}.`);
+    return { sourceType, url, path, fileName, format, updatedAt, size, tagsCount, sampleTags };
+  }
+
+  function validateRuleSetEntry(raw) {
+    if (!raw || typeof raw !== "object") throw new Error("Некорректное описание Rule-Set.");
+    const tag = normalizeGeoTag(raw.tag || "", "ruleset");
+    const enabled = raw.enabled !== false;
+    const sourceType = raw.sourceType === "local" ? "local" : "remote";
+    const url = validateGeoUrl(raw.url || "");
+    const path = validateGeoPath(raw.path || "");
+    if (sourceType === "remote" && !url) throw new Error(`Укажите HTTPS-ссылку для Rule-Set «${tag}».`);
+    if (sourceType === "local") {
+      if (!path) throw new Error(`Укажите путь или загрузите файл для Rule-Set «${tag}».`);
+      if (!/\.(srs|json)$/i.test(path)) throw new Error(`Rule-Set «${tag}» поддерживает только .srs или .json файлы.`);
+    }
+    const fmtHint = detectGeoFormat(sourceType === "remote" ? (path || url) : path, "");
+    const format = ["binary", "source"].includes(raw.format)
+      ? raw.format
+      : (fmtHint === "json" ? "source" : "binary");
+    const fileName = String(raw.fileName || "").trim().slice(0, 200);
+    const updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt.slice(0, 64) : "";
+    const size = Number.isInteger(raw.size) && raw.size >= 0 ? raw.size : 0;
+    return { id: raw.id || crypto.randomUUID(), tag, enabled, sourceType, format, url, path, fileName, updatedAt, size };
+  }
+
+  function validateGeoSettings(rawGeo) {
+    const g = rawGeo && typeof rawGeo === "object" ? rawGeo : {};
+    const ruleSets = Array.isArray(g.ruleSets) ? g.ruleSets.map(validateRuleSetEntry) : [];
+    const seenTags = new Set();
+    for (const rs of ruleSets) {
+      if (seenTags.has(rs.tag)) throw new Error(`Дублирующийся тег Rule-Set: «${rs.tag}».`);
+      seenTags.add(rs.tag);
+    }
+    return {
+      geoip: validateGeoSource(g.geoip, "GeoIP"),
+      geosite: validateGeoSource(g.geosite, "Geosite / Geodata"),
+      ruleSets,
+      updateViaProxy: g.updateViaProxy === true
+    };
+  }
+
+  function hasCoreOnlyRules(s) {
+    return Array.isArray(s?.rules) && s.rules.some(r => r && r.enabled !== false && CORE_RULE_KINDS.has(r.kind));
+  }
+
   function normalizeRule(rule) {
     if (!rule || typeof rule !== "object") throw new Error("Некорректное правило.");
-    if (!["domain", "suffix", "keyword"].includes(rule.kind)) throw new Error("Неизвестный тип доменного правила.");
+    if (!["domain", "suffix", "keyword", "cidr", "geoip", "geosite", "ruleset"].includes(rule.kind)) {
+      throw new Error("Неизвестный тип правила.");
+    }
     if (!["proxy", "direct", "block"].includes(rule.action)) throw new Error("Неизвестное действие правила.");
     let value;
     if (rule.kind === "keyword") {
       value = String(rule.value || "").trim().toLowerCase();
       if (/[\s/?#@\\\x00-\x1f]/.test(value)) throw new Error("Подстрока домена не должна содержать пробелы или спецсимволы URL.");
+    } else if (rule.kind === "cidr") {
+      value = normalizeCidr(rule.value);
+    } else if (rule.kind === "geoip" || rule.kind === "geosite" || rule.kind === "ruleset") {
+      value = normalizeGeoTag(rule.value, rule.kind);
     } else {
       value = normalizeDomain(String(rule.value || ""));
     }
@@ -461,7 +632,7 @@
     return isLocalIpv4Tuple(Number(m[1]), Number(m[2]));
   }
 
-  function actionFor(url, settings) {
+  function routePolicy(url, settings) {
     let u;
     try { u = new URL(url); } catch { return "direct"; }
     if (!["http:", "https:", "ws:", "wss:", "ftp:"].includes(u.protocol)) return "direct";
@@ -471,9 +642,15 @@
     if (settings.bypassLocal && isLocal(host)) return "direct";
     for (const r of settings.rules) {
       if (!r.enabled) continue;
+      if (CORE_RULE_KINDS.has(r.kind)) return "core";
       if ((r.kind === "domain" && host === r.value) || (r.kind === "suffix" && (host === r.value || host.endsWith(`.${r.value}`))) || (r.kind === "keyword" && host.includes(r.value))) return r.action;
     }
     return settings.mode === "global" ? "proxy" : settings.defaultAction;
+  }
+
+  function actionFor(url, settings) {
+    const policy = routePolicy(url, settings);
+    return policy === "core" ? "proxy" : policy;
   }
 
   function validateProbeUrl(rawUrl) {
@@ -678,15 +855,18 @@
     }
     if (!["system", "light", "dark"].includes(result.theme)) throw new Error("Неизвестная тема оформления.");
     result.probeUrl = validateProbeUrl(result.probeUrl);
+    result.geo = validateGeoSettings(result.geo);
     // Drop unknown top-level keys from imported backups.
     return Object.fromEntries(Object.keys(defaults()).map(k => [k, result[k]]));
   }
 
   root.FoxTunnel = {
-    TYPES, defaults, decode64, parseLink, parseSubscription, validateOutbound,
+    TYPES, defaults, DEFAULT_GEO_SOURCE, CORE_RULE_KINDS, decode64, parseLink, parseSubscription, validateOutbound,
     validateSettings, validateProbeUrl, validateSubscriptionUrl, maskSubscriptionUrl,
     parseSubscriptionHeaders, mergeSubscriptionProfiles,
-    normalizeRule, normalizeDomain, actionFor, isLocal, isValidIp
+    normalizeRule, normalizeDomain, normalizeCidr, normalizeGeoTag,
+    validateGeoUrl, validateGeoPath, validateGeoSource, validateRuleSetEntry, validateGeoSettings,
+    hasCoreOnlyRules, routePolicy, actionFor, isLocal, isValidIp
   };
   if (typeof module !== "undefined") module.exports = root.FoxTunnel;
 })(globalThis);

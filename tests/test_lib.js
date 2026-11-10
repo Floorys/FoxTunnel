@@ -211,3 +211,61 @@ test("subscriptions: URL validation, headers, masking, merge and settings", () =
   assert.equal(valid.profiles[1].subscriptionId, subId);
 });
 
+test("geo routing: cidr, geoip, geosite, ruleset normalization, policy order, and geo sources", () => {
+  const rCidr = FoxTunnel.normalizeRule({ kind: "cidr", action: "direct", value: "198.51.100.5" });
+  assert.equal(rCidr.value, "198.51.100.5/32");
+  const rCidr6 = FoxTunnel.normalizeRule({ kind: "cidr", action: "proxy", value: "[2001:0db8:0000:0000::]/32" });
+  assert.equal(rCidr6.value, "2001:db8::/32");
+  assert.throws(() => FoxTunnel.normalizeRule({ kind: "cidr", action: "direct", value: "1.2.3.4/99" }));
+
+  const rGeoip = FoxTunnel.normalizeRule({ kind: "geoip", action: "direct", value: "GEOIP:RU" });
+  assert.equal(rGeoip.value, "ru");
+  const rGeosite = FoxTunnel.normalizeRule({ kind: "geosite", action: "proxy", value: "geosite:YouTube@!CN" });
+  assert.equal(rGeosite.value, "youtube@!cn");
+  const rSet = FoxTunnel.normalizeRule({ kind: "ruleset", action: "block", value: "ruleset:Ads_List" });
+  assert.equal(rSet.value, "ads_list");
+  assert.throws(() => FoxTunnel.normalizeRule({ kind: "geosite", action: "proxy", value: "bad/tag" }));
+
+  const s = FoxTunnel.validateSettings({
+    ...FoxTunnel.defaults(),
+    mode: "rules",
+    defaultAction: "direct",
+    geo: {
+      geoip: { sourceType: "remote", url: "https://example.invalid/geoip.dat", path: "", format: "dat" },
+      geosite: { sourceType: "local", path: "C:\\Geo\\geosite.dat" },
+      ruleSets: [{ id: "rs1", tag: "custom-ads", enabled: true, sourceType: "remote", format: "binary", url: "https://example.invalid/ads.srs" }],
+      updateViaProxy: true
+    },
+    rules: [
+      { kind: "domain", action: "direct", value: "direct-first.invalid" },
+      { kind: "geosite", action: "proxy", value: "youtube" },
+      { kind: "suffix", action: "block", value: "later.invalid" }
+    ]
+  });
+  assert.equal(FoxTunnel.hasCoreOnlyRules(s), true);
+  assert.equal(FoxTunnel.routePolicy("https://direct-first.invalid/", s), "direct");
+  assert.equal(FoxTunnel.routePolicy("https://www.youtube.com/", s), "core");
+  assert.equal(FoxTunnel.routePolicy("https://later.invalid/", s), "core");
+  assert.equal(FoxTunnel.actionFor("https://later.invalid/", s), "proxy");
+
+  const disabledCore = { ...s, rules: s.rules.map(r => (r.kind === "geosite" ? { ...r, enabled: false } : r)) };
+  assert.equal(FoxTunnel.hasCoreOnlyRules(disabledCore), false);
+  assert.equal(FoxTunnel.routePolicy("https://later.invalid/", disabledCore), "block");
+
+  assert.throws(() => FoxTunnel.validateGeoSettings({ geoip: { sourceType: "remote", url: "http://example.invalid/geoip.dat" } }));
+  assert.throws(() => FoxTunnel.validateGeoSettings({ geoip: { sourceType: "remote", url: "https://127.0.0.1/geoip.dat" } }));
+  assert.throws(() => FoxTunnel.validateGeoSettings({ geoip: { sourceType: "local", path: "C:\\Geo\\bad.exe" } }));
+  assert.throws(() => FoxTunnel.validateGeoSettings({
+    ruleSets: [
+      { id: "1", tag: "dup", sourceType: "remote", url: "https://example.invalid/a.srs" },
+      { id: "2", tag: "dup", sourceType: "remote", url: "https://example.invalid/b.srs" }
+    ]
+  }));
+
+  // Legacy backups without geo field remain valid.
+  const legacy = FoxTunnel.validateSettings({ version: 1, profiles: [], rules: [] });
+  assert.equal(legacy.geo.geoip.sourceType, "none");
+  assert.deepEqual(legacy.geo.ruleSets, []);
+});
+
+

@@ -3,6 +3,8 @@
 const $ = id => document.getElementById(id);
 let savedSettings = FoxTunnel.defaults();
 let routingRules = [];
+let routingGeo = FoxTunnel.defaults().geo;
+let geoDiskStatus = null;
 let currentState = null;
 let editId = "";
 let dirtyRouting = false;
@@ -14,7 +16,28 @@ const probeResults = new Map();
 
 const labels = {
   proxy: "VPN", direct: "Напрямую", block: "Блокировать",
-  domain: "Точно", suffix: "Домен + поддомены", keyword: "Подстрока"
+  core: "Решает ядро (GeoIP / Geosite / CIDR / Rule-Set)",
+  domain: "Точно", suffix: "Домен + поддомены", keyword: "Подстрока",
+  cidr: "IP / CIDR", geoip: "GeoIP", geosite: "Geosite", ruleset: "Rule-Set"
+};
+const ruleKindHints = {
+  suffix: { label: "Домен или поддомены", placeholder: "example.com" },
+  domain: { label: "Точный домен", placeholder: "api.example.com" },
+  keyword: { label: "Подстрока в домене", placeholder: "yandex" },
+  cidr: { label: "IP или CIDR подсеть", placeholder: "192.168.0.0/16 или 1.1.1.1" },
+  geosite: { label: "Категория Geosite (можно с @атрибутом)", placeholder: "youtube, category-ads-all, google@!cn" },
+  geoip: { label: "Код страны или тег GeoIP", placeholder: "ru, private, cloudflare" },
+  ruleset: { label: "Тег дополнительного Rule-Set", placeholder: "ru-blocked" }
+};
+const GEO_PRESETS = {
+  geoip: {
+    loyal: "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat",
+    runet: "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat"
+  },
+  geosite: {
+    loyal: "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat",
+    runet: "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat"
+  }
 };
 const themeLabels = { system: "Тема: Авто", light: "Тема: Светлая", dark: "Тема: Тёмная" };
 const themeOrder = ["system", "dark", "light"];
@@ -24,6 +47,37 @@ const securityFields = [
   "theme", "probeUrl", "dnsMode", "dnsServer", "dnsServerName", "dnsPath"
 ];
 
+function formatBytes(n) {
+  if (!n || n < 0) return "";
+  if (n < 1024) return `${n} Б`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} КБ`;
+  return `${(n / (1024 * 1024)).toFixed(2)} МБ`;
+}
+function formatIsoShort(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("ru-RU");
+}
+function bytesToBase64(bytes) {
+  let out = "";
+  const step = 8192;
+  for (let i = 0; i < bytes.length; i += step) {
+    out += String.fromCharCode(...bytes.subarray(i, i + step));
+  }
+  return btoa(out);
+}
+async function uploadGeoFile(file, target, ruleSetId = "") {
+  if (!file) throw new Error("Файл не выбран.");
+  if (file.size <= 0 || file.size > 64 * 1024 * 1024) throw new Error("Размер файла должен быть от 1 байта до 64 МБ.");
+  const begin = await send("geoUploadBegin", { target, fileName: file.name, totalSize: file.size, ruleSetId });
+  const chunkSize = 256 * 1024;
+  for (let offset = 0; offset < file.size; offset += chunkSize) {
+    const buf = await file.slice(offset, Math.min(file.size, offset + chunkSize)).arrayBuffer();
+    await send("geoUploadChunk", { uploadId: begin.uploadId, data: bytesToBase64(new Uint8Array(buf)) });
+  }
+  const finished = await send("geoUploadFinish", { uploadId: begin.uploadId, target, ruleSetId, autoSave: false });
+  return finished.info;
+}
 async function send(type, extra = {}) {
   const reply = await browser.runtime.sendMessage({ type, ...extra });
   if (!reply.ok) throw new Error(reply.error);
@@ -47,9 +101,14 @@ function updateThemeUi(mode) {
   $("themeToggle").textContent = themeLabels[applied] || themeLabels.system;
 }
 function updateDirtyIndicators() {
-  const r = $("routingStatus");
-  r.textContent = dirtyRouting ? "Есть несохранённые изменения маршрутизации." : "Изменения правил применяются после сохранения.";
-  r.className = dirtyRouting ? "fine dirty-note" : "fine";
+  const msg = dirtyRouting ? "Есть несохранённые изменения маршрутизации или Geo-баз." : "Изменения правил и Geo-баз применяются после сохранения.";
+  const cls = dirtyRouting ? "fine dirty-note" : "fine";
+  $("routingStatus").textContent = msg;
+  $("routingStatus").className = cls;
+  if ($("geoSaveNote")) {
+    $("geoSaveNote").textContent = msg;
+    $("geoSaveNote").className = cls;
+  }
   const s = $("securityStatus");
   s.textContent = dirtySecurity
     ? "Есть несохранённые изменения сети и защиты."
@@ -254,11 +313,28 @@ function renderProfiles() {
     list.append(item);
   }
 }
+function geoSourceIssue(r) {
+  if (r.kind === "geoip" || r.kind === "geosite") {
+    const src = routingGeo[r.kind];
+    if (!src || src.sourceType === "none") return `настройте ${labels[r.kind]}`;
+    if (src.sourceType === "remote" && !src.path) return `скачайте ${labels[r.kind]}`;
+    const disk = geoDiskStatus?.[r.kind];
+    if (disk && src.path && disk.exists === false) return "файл не найден на диске";
+  } else if (r.kind === "ruleset") {
+    const rs = (routingGeo.ruleSets || []).find(item => item.tag === r.value && item.enabled !== false);
+    if (!rs) return `добавьте Rule-Set «${r.value}»`;
+    if (rs.sourceType === "remote" && !rs.path) return "скачайте Rule-Set";
+    const disk = geoDiskStatus?.ruleSets?.[rs.id];
+    if (disk && rs.path && disk.exists === false) return "файл Rule-Set не найден";
+  }
+  return "";
+}
+
 function renderRules() {
   const list = $("rules");
   list.replaceChildren();
   if (!routingRules.length) {
-    list.append(empty("Нет правил. В режиме «По правилам» без правил весь трафик идёт напрямую: добавьте домен с действием «VPN» и сохраните, либо выберите режим «Весь веб-трафик»."));
+    list.append(empty("Нет правил. В режиме «По правилам» без правил весь трафик идёт напрямую: добавьте правило с действием «VPN» и сохраните, либо выберите режим «Весь веб-трафик»."));
   }
   routingRules.forEach((r, i) => {
     const item = document.createElement("div");
@@ -277,7 +353,8 @@ function renderRules() {
     const name = document.createElement("strong");
     name.textContent = `${i + 1}. ${r.value}`;
     const sub = document.createElement("small");
-    sub.textContent = `${labels[r.kind]} → ${labels[r.action]}`;
+    const issue = r.enabled ? geoSourceIssue(r) : "";
+    sub.textContent = `${labels[r.kind] || r.kind} → ${labels[r.action]}${issue ? ` · ⚠ ${issue}` : ""}`;
     info.append(name, sub);
     item.append(enabled, info);
     const move = direction => {
@@ -301,6 +378,163 @@ function renderRules() {
     list.append(item);
   });
 }
+
+function renderGeoMeta(kind) {
+  const src = routingGeo[kind] || FoxTunnel.DEFAULT_GEO_SOURCE();
+  const el = $(`${kind}Meta`);
+  const disk = geoDiskStatus?.[kind];
+  if (src.sourceType === "none") {
+    el.textContent = "Источник не выбран.";
+    el.className = "geo-meta";
+    return;
+  }
+  if (src.sourceType === "remote" && !src.path) {
+    el.textContent = src.url
+      ? "Удалённая база ещё не скачана. Нажмите «Обновить» справа, чтобы загрузить файл."
+      : "Укажите HTTPS-ссылку (или выберите пресет) и нажмите «Обновить».";
+    el.className = "geo-meta warn";
+    return;
+  }
+  if (src.sourceType === "local" && !src.path) {
+    el.textContent = "Укажите путь к файлу .dat/.srs/.json или выберите файл с диска.";
+    el.className = "geo-meta warn";
+    return;
+  }
+  if (disk && src.path && disk.exists === false) {
+    el.textContent = `Файл отсутствует на диске: ${disk.error || src.path}`;
+    el.className = "geo-meta warn";
+    return;
+  }
+  const parts = [];
+  if (src.fileName || src.path) parts.push(src.fileName || src.path.split(/[\\/]/).pop());
+  if (src.format) parts.push(`.${src.format}`);
+  if (src.tagsCount > 0) parts.push(`${src.tagsCount} категорий`);
+  if (src.size > 0) parts.push(formatBytes(src.size));
+  if (src.updatedAt) parts.push(`обновлено ${formatIsoShort(src.updatedAt)}`);
+  el.textContent = parts.length ? parts.join(" · ") : src.path;
+  el.className = "geo-meta ok";
+}
+
+function syncGeoBoxes(kind) {
+  const type = $(`${kind}SourceType`).value;
+  $(`${kind}RemoteBox`).hidden = type !== "remote";
+  $(`${kind}LocalBox`).hidden = type !== "local";
+}
+
+function renderRuleSets() {
+  const list = $("ruleSetsList");
+  list.replaceChildren();
+  const items = routingGeo.ruleSets || [];
+  if (!items.length) {
+    list.append(empty("Нет дополнительных Rule-Set списков. Добавьте .srs или .json ниже при необходимости."));
+    return;
+  }
+  items.forEach((rs, idx) => {
+    const item = document.createElement("div");
+    item.className = "list-item";
+    const enabled = document.createElement("input");
+    enabled.type = "checkbox";
+    enabled.checked = rs.enabled !== false;
+    enabled.setAttribute("aria-label", `Включить Rule-Set ${rs.tag}`);
+    enabled.addEventListener("change", () => {
+      rs.enabled = enabled.checked;
+      dirtyRouting = true;
+      updateDirtyIndicators();
+      renderRules();
+    });
+    const info = document.createElement("div");
+    info.className = "info";
+    const name = document.createElement("strong");
+    name.textContent = `ruleset:${rs.tag} (${rs.format === "source" ? ".json" : ".srs"})`;
+    const sub = document.createElement("small");
+    const disk = geoDiskStatus?.ruleSets?.[rs.id];
+    const parts = [rs.sourceType === "remote" ? rs.url : (rs.fileName || rs.path)];
+    if (rs.sourceType === "remote" && !rs.path) parts.push("не скачан");
+    else if (disk && rs.path && disk.exists === false) parts.push("файл отсутствует");
+    else {
+      if (rs.size > 0) parts.push(formatBytes(rs.size));
+      if (rs.updatedAt) parts.push(`обновлено ${formatIsoShort(rs.updatedAt)}`);
+    }
+    sub.textContent = parts.filter(Boolean).join(" · ");
+    info.append(name, sub);
+    item.append(enabled, info);
+    if (rs.sourceType === "remote") {
+      item.append(button("Обновить", async () => {
+        await runGeoUpdate(["ruleset"], [rs.id]);
+      }));
+    } else {
+      item.append(button("Проверить", async () => {
+        const res = await send("geoInspect", { path: rs.path, target: "ruleset" });
+        rs.size = res.size;
+        rs.updatedAt = res.updatedAt;
+        rs.format = res.format === "json" ? "source" : "binary";
+        rs.fileName = res.fileName;
+        renderRuleSets();
+        toast(`Rule-Set «${rs.tag}» корректен (${formatBytes(res.size)}).`);
+      }));
+    }
+    item.append(button("Удалить", () => {
+      routingGeo.ruleSets.splice(idx, 1);
+      dirtyRouting = true;
+      updateDirtyIndicators();
+      renderRuleSets();
+      renderRules();
+      refreshGeoDatalist();
+    }, "danger"));
+    list.append(item);
+  });
+}
+
+function renderGeoSection() {
+  for (const kind of ["geoip", "geosite"]) {
+    const src = routingGeo[kind] || FoxTunnel.DEFAULT_GEO_SOURCE();
+    $(`${kind}SourceType`).value = src.sourceType || "none";
+    $(`${kind}Url`).value = src.url || "";
+    $(`${kind}Path`).value = src.path || "";
+    syncGeoBoxes(kind);
+    renderGeoMeta(kind);
+  }
+  $("geoUpdateViaProxy").checked = Boolean(routingGeo.updateViaProxy);
+  renderRuleSets();
+  refreshGeoDatalist();
+}
+
+function refreshGeoDatalist() {
+  const list = $("geoTagSuggestions");
+  const kind = $("ruleKind").value;
+  list.replaceChildren();
+  let suggestions = [];
+  if (kind === "geoip") {
+    suggestions = (routingGeo.geoip?.sampleTags?.length ? routingGeo.geoip.sampleTags : ["ru", "us", "de", "nl", "private", "cloudflare", "telegram", "google"]);
+  } else if (kind === "geosite") {
+    suggestions = (routingGeo.geosite?.sampleTags?.length ? routingGeo.geosite.sampleTags : ["youtube", "google", "discord", "twitter", "telegram", "category-ads-all", "geolocation-!cn", "category-ru"]);
+  } else if (kind === "ruleset") {
+    suggestions = (routingGeo.ruleSets || []).map(r => r.tag);
+  }
+  for (const s of suggestions) {
+    const opt = document.createElement("option");
+    opt.value = s;
+    list.append(opt);
+  }
+}
+
+function updateRuleInputHint() {
+  const hint = ruleKindHints[$("ruleKind").value] || ruleKindHints.suffix;
+  $("ruleValueLabel").textContent = hint.label;
+  $("ruleValue").placeholder = hint.placeholder;
+  refreshGeoDatalist();
+}
+
+async function refreshGeoDiskStatus() {
+  try {
+    geoDiskStatus = await send("geoStatus", { geo: routingGeo });
+    renderGeoMeta("geoip");
+    renderGeoMeta("geosite");
+    renderRuleSets();
+    renderRules();
+  } catch {}
+}
+
 function fillFields(ids, source) {
   for (const id of ids) {
     const el = $(id);
@@ -322,7 +556,9 @@ function fillAll(force = false) {
   if (force || !dirtyRouting) {
     fillFields(routingFields, savedSettings);
     routingRules = structuredClone(savedSettings.rules);
+    routingGeo = structuredClone(savedSettings.geo || FoxTunnel.defaults().geo);
     dirtyRouting = false;
+    renderGeoSection();
     renderRules();
   }
   if (force || !dirtySecurity) {
@@ -530,6 +766,216 @@ handle("probeEditor", async () => {
   }
 });
 handle("resetEditor", () => resetEditor(false));
+$("ruleKind").addEventListener("change", updateRuleInputHint);
+$("geoUpdateViaProxy").addEventListener("change", () => {
+  routingGeo.updateViaProxy = $("geoUpdateViaProxy").checked;
+  dirtyRouting = true;
+  updateDirtyIndicators();
+});
+
+async function runGeoUpdate(targets, ruleSetIds = []) {
+  let geoPayload;
+  if (targets.length === 1 && targets[0] === "geoip") {
+    geoPayload = {
+      ...savedSettings.geo,
+      geoip: FoxTunnel.validateGeoSource(routingGeo.geoip, "GeoIP"),
+      updateViaProxy: Boolean(routingGeo.updateViaProxy)
+    };
+  } else if (targets.length === 1 && targets[0] === "geosite") {
+    geoPayload = {
+      ...savedSettings.geo,
+      geosite: FoxTunnel.validateGeoSource(routingGeo.geosite, "Geosite / Geodata"),
+      updateViaProxy: Boolean(routingGeo.updateViaProxy)
+    };
+  } else if (targets.length === 1 && targets[0] === "ruleset" && ruleSetIds.length === 1) {
+    const rawEntry = (routingGeo.ruleSets || []).find(item => item.id === ruleSetIds[0]);
+    if (!rawEntry) throw new Error("Rule-Set не найден.");
+    const validEntry = FoxTunnel.validateRuleSetEntry(rawEntry);
+    const mergedList = [
+      ...(savedSettings.geo?.ruleSets || []).filter(item => item.id !== validEntry.id && item.tag !== validEntry.tag),
+      validEntry
+    ];
+    geoPayload = {
+      ...savedSettings.geo,
+      ruleSets: mergedList,
+      updateViaProxy: Boolean(routingGeo.updateViaProxy)
+    };
+  } else {
+    geoPayload = FoxTunnel.validateGeoSettings(routingGeo);
+  }
+  toast("Скачивание Geo-базы…");
+  const res = await send("geoUpdate", { targets, ruleSetIds, geo: geoPayload });
+  savedSettings = structuredClone(res.state.settings);
+  if (res.geoip && res.geo?.geoip) routingGeo.geoip = structuredClone(res.geo.geoip);
+  if (res.geosite && res.geo?.geosite) routingGeo.geosite = structuredClone(res.geo.geosite);
+  if (res.ruleSets && res.geo?.ruleSets) {
+    const updatedMap = new Map(res.geo.ruleSets.map(r => [r.id, r]));
+    routingGeo.ruleSets = (routingGeo.ruleSets || []).map(r => (res.ruleSets[r.id] && updatedMap.get(r.id) ? structuredClone(updatedMap.get(r.id)) : r));
+  }
+  status(res.state);
+  renderGeoSection();
+  renderRules();
+  refreshGeoDiskStatus();
+  const errList = Object.values(res.errors || {});
+  if (errList.length) {
+    toast(`Обновлено баз: ${res.updatedCount}. Ошибки:\n${errList.join("\n")}`, true);
+  } else {
+    toast(`Обновлено баз: ${res.updatedCount}${res.viaProxy ? " (через активный VPN)" : ""}.`);
+  }
+}
+
+function bindGeoSourceCard(kind, label) {
+  const cap = kind === "geoip" ? "Geoip" : "Geosite";
+  $(`${kind}SourceType`).addEventListener("change", () => {
+    const nextType = $(`${kind}SourceType`).value;
+    routingGeo[kind] = {
+      ...FoxTunnel.DEFAULT_GEO_SOURCE(),
+      sourceType: nextType,
+      url: routingGeo[kind]?.url || ""
+    };
+    syncGeoBoxes(kind);
+    renderGeoMeta(kind);
+    dirtyRouting = true;
+    updateDirtyIndicators();
+    renderRules();
+  });
+  $(`${kind}Url`).addEventListener("input", () => {
+    routingGeo[kind].url = $(`${kind}Url`).value;
+    dirtyRouting = true;
+    updateDirtyIndicators();
+  });
+  $(`${kind}Path`).addEventListener("input", () => {
+    routingGeo[kind].path = $(`${kind}Path`).value;
+    routingGeo[kind].fileName = "";
+    routingGeo[kind].size = 0;
+    routingGeo[kind].tagsCount = 0;
+    routingGeo[kind].sampleTags = [];
+    renderGeoMeta(kind);
+    dirtyRouting = true;
+    updateDirtyIndicators();
+  });
+  for (const [suffix, presetKey] of [["Loyal", "loyal"], ["Runet", "runet"]]) {
+    $(`preset${cap}${suffix}`).addEventListener("click", () => {
+      routingGeo[kind] = {
+        ...FoxTunnel.DEFAULT_GEO_SOURCE(),
+        sourceType: "remote",
+        url: GEO_PRESETS[kind][presetKey]
+      };
+      renderGeoSection();
+      renderRules();
+      dirtyRouting = true;
+      updateDirtyIndicators();
+    });
+  }
+  handle(`update${cap}`, () => runGeoUpdate([kind]));
+  handle(`inspect${cap}`, async () => {
+    const info = await send("geoInspect", { path: $(`${kind}Path`).value, target: kind });
+    routingGeo[kind] = {
+      ...routingGeo[kind],
+      sourceType: "local",
+      path: info.path,
+      fileName: info.fileName,
+      format: info.format,
+      updatedAt: info.updatedAt,
+      size: info.size,
+      tagsCount: info.tagsCount,
+      sampleTags: info.sampleTags || []
+    };
+    renderGeoSection();
+    renderRules();
+    refreshGeoDiskStatus();
+    dirtyRouting = true;
+    updateDirtyIndicators();
+    toast(`${label}: файл проверен (${info.tagsCount ? `${info.tagsCount} категорий` : `.${info.format}`}).`);
+  });
+  $(`pick${cap}File`).addEventListener("click", () => $(`${kind}FileInput`).click());
+  $(`${kind}FileInput`).addEventListener("change", async e => {
+    try {
+      const file = e.target.files[0];
+      if (!file) return;
+      toast(`Загрузка ${file.name}…`);
+      const info = await uploadGeoFile(file, kind);
+      routingGeo[kind] = {
+        ...routingGeo[kind],
+        sourceType: "local",
+        path: info.path,
+        fileName: info.fileName,
+        format: info.format,
+        updatedAt: info.updatedAt,
+        size: info.size,
+        tagsCount: info.tagsCount,
+        sampleTags: info.sampleTags || []
+      };
+      renderGeoSection();
+      renderRules();
+      refreshGeoDiskStatus();
+      dirtyRouting = true;
+      updateDirtyIndicators();
+      toast(`${label}: файл «${info.fileName}» загружен. Нажмите «Сохранить маршруты».`);
+    } catch (err) { toast(err.message, true); }
+    finally { e.target.value = ""; }
+  });
+}
+
+bindGeoSourceCard("geoip", "GeoIP");
+bindGeoSourceCard("geosite", "Geosite");
+handle("updateAllGeo", () => runGeoUpdate(["geoip", "geosite", "ruleset"]));
+
+let pendingRsId = crypto.randomUUID();
+let pendingRsMeta = null;
+$("rsSourceType").addEventListener("change", () => {
+  const isRemote = $("rsSourceType").value === "remote";
+  $("rsRemoteBox").hidden = !isRemote;
+  $("rsLocalBox").hidden = isRemote;
+});
+$("pickRsFile").addEventListener("click", () => $("rsFileInput").click());
+$("rsFileInput").addEventListener("change", async e => {
+  try {
+    const file = e.target.files[0];
+    if (!file) return;
+    toast(`Загрузка ${file.name}…`);
+    const info = await uploadGeoFile(file, "ruleset", pendingRsId);
+    pendingRsMeta = info;
+    $("rsPath").value = info.path;
+    $("rsFormat").value = info.format === "json" ? "source" : "binary";
+    if (!$("rsTag").value.trim()) {
+      $("rsTag").value = file.name.replace(/\.(srs|json)$/i, "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    }
+    toast(`Файл «${info.fileName}» загружен. Нажмите «Добавить Rule-Set».`);
+  } catch (err) { toast(err.message, true); }
+  finally { e.target.value = ""; }
+});
+handle("addRuleSet", () => {
+  const isRemote = $("rsSourceType").value === "remote";
+  const raw = {
+    id: pendingRsId,
+    tag: $("rsTag").value,
+    enabled: true,
+    sourceType: isRemote ? "remote" : "local",
+    format: $("rsFormat").value,
+    url: isRemote ? $("rsUrl").value : "",
+    path: isRemote ? "" : $("rsPath").value,
+    fileName: !isRemote && pendingRsMeta?.path === $("rsPath").value ? pendingRsMeta.fileName : "",
+    updatedAt: !isRemote && pendingRsMeta?.path === $("rsPath").value ? pendingRsMeta.updatedAt : "",
+    size: !isRemote && pendingRsMeta?.path === $("rsPath").value ? pendingRsMeta.size : 0
+  };
+  const entry = FoxTunnel.validateRuleSetEntry(raw);
+  if ((routingGeo.ruleSets || []).some(r => r.tag === entry.tag)) {
+    throw new Error(`Rule-Set с тегом «${entry.tag}» уже существует.`);
+  }
+  routingGeo.ruleSets = [...(routingGeo.ruleSets || []), entry];
+  pendingRsId = crypto.randomUUID();
+  pendingRsMeta = null;
+  $("rsTag").value = "";
+  $("rsUrl").value = "";
+  $("rsPath").value = "";
+  dirtyRouting = true;
+  updateDirtyIndicators();
+  renderRuleSets();
+  renderRules();
+  refreshGeoDatalist();
+});
+
 handle("addRule", () => {
   routingRules.push(FoxTunnel.normalizeRule({
     kind: $("ruleKind").value,
@@ -541,10 +987,17 @@ handle("addRule", () => {
   updateDirtyIndicators();
   renderRules();
 });
-handle("saveRouting", async () => {
-  const patch = { ...collectFields(routingFields), rules: routingRules };
-  await saveMerged(patch, "Маршрутизация сохранена. Перезагрузите нужные вкладки.", { clearDirty: "routing" });
-});
+async function saveRoutingAction() {
+  const patch = {
+    ...collectFields(routingFields),
+    rules: routingRules,
+    geo: FoxTunnel.validateGeoSettings({ ...routingGeo, updateViaProxy: $("geoUpdateViaProxy").checked })
+  };
+  await saveMerged(patch, "Маршрутизация и Geo-базы сохранены. Перезагрузите нужные вкладки.", { clearDirty: "routing" });
+  refreshGeoDiskStatus();
+}
+handle("saveRouting", saveRoutingAction);
+handle("saveGeoRouting", saveRoutingAction);
 handle("saveSecurity", async () => {
   const patch = collectFields(securityFields);
   await saveMerged(patch, "Настройки сети и защиты сохранены.", { clearDirty: "security" });
@@ -555,7 +1008,7 @@ handle("testRoute", async () => {
   try { url = new URL($("testUrl").value); } catch { throw new Error("Введите корректный URL для проверки."); }
   const result = await send("routePreview", { url: url.href });
   const note = dirtyRouting ? " (проверено по сохранённым правилам)" : "";
-  $("routeResult").textContent = `${url.hostname} → ${labels[result]}${note}`;
+  $("routeResult").textContent = `${url.hostname} → ${labels[result] || result}${note}`;
 });
 handle("diagnostics", async () => { $("diagnosticOutput").textContent = JSON.stringify(await send("diagnostics"), null, 2); });
 handle("getLogs", async () => { const result = await send("logs"); $("coreLogs").textContent = result.text || "Журнал пуст."; });
@@ -621,9 +1074,11 @@ browser.runtime.onMessage.addListener(message => {
 
 (async () => {
   try {
+    updateRuleInputHint();
     const state = await send("getState");
     savedSettings = structuredClone(state.settings);
     fillAll(true);
     status(state);
+    refreshGeoDiskStatus();
   } catch (e) { toast(e.message, true); }
 })();

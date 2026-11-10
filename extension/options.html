@@ -93,7 +93,7 @@
         <section data-panel="routing" hidden>
           <div class="panel">
             <h1>Маршрутизация</h1>
-            <p class="muted">Правила проверяются сверху вниз. Первое совпадение побеждает. Домен ресурса, а не открытой вкладки, определяет маршрут: CDN и поддомены нужно учитывать отдельно.</p>
+            <p class="muted">Правила проверяются сверху вниз. Первое совпадение побеждает. Помимо доменных правил, поддерживаются CIDR, категории GeoIP / Geosite и собственные Rule-Set (.srs / .json).</p>
             <div class="columns">
               <div>
                 <label for="mode">Режим</label>
@@ -122,6 +122,10 @@
                   <option value="suffix">Домен и поддомены</option>
                   <option value="domain">Точный домен</option>
                   <option value="keyword">Подстрока в домене</option>
+                  <option value="geosite">Geosite категория (geosite:...)</option>
+                  <option value="geoip">GeoIP страна / тег (geoip:...)</option>
+                  <option value="cidr">IP / CIDR подсеть</option>
+                  <option value="ruleset">Rule-Set по тегу (.srs / .json)</option>
                 </select>
               </div>
               <div>
@@ -133,14 +137,140 @@
                 </select>
               </div>
             </div>
-            <label for="ruleValue">Домен или подстрока</label>
-            <input id="ruleValue" placeholder="example.com">
+            <label id="ruleValueLabel" for="ruleValue">Домен или подстрока</label>
+            <input id="ruleValue" list="geoTagSuggestions" placeholder="example.com">
+            <datalist id="geoTagSuggestions"></datalist>
             <div class="actions"><button id="addRule">Добавить правило</button></div>
             <div class="savebar">
-              <p id="routingStatus" class="fine">Изменения правил применяются после сохранения.</p>
+              <p id="routingStatus" class="fine">Изменения правил и Geo-баз применяются после сохранения.</p>
               <button id="saveRouting" class="primary">Сохранить маршруты</button>
             </div>
           </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Базы GeoIP, Geosite и Rule-Sets</h2>
+              <div class="actions">
+                <button id="updateAllGeo" class="primary">Обновить все базы</button>
+              </div>
+            </div>
+            <p class="muted">Как в Happ и других клиентах: подключите собственные базы <code>geoip.dat</code> / <code>geosite.dat</code> (или готовые <code>.srs</code> / <code>.json</code>) по HTTPS-ссылке или локально с диска. При активации правил <code>geosite</code>, <code>geoip</code>, <code>cidr</code> или <code>ruleset</code> запросы маршрутизируются ядром <code>sing-box</code> в точном порядке сверху вниз.</p>
+
+            <div class="geo-grid">
+              <div class="geo-card">
+                <h3>GeoIP (страны и IP-сети)</h3>
+                <label for="geoipSourceType">Источник</label>
+                <select id="geoipSourceType">
+                  <option value="none">Не используется</option>
+                  <option value="remote">Удалённый URL (HTTPS)</option>
+                  <option value="local">Локальный файл (.dat / .srs / .json)</option>
+                </select>
+                <div id="geoipRemoteBox" hidden>
+                  <label for="geoipUrl">Ссылка на geoip.dat / .srs</label>
+                  <div class="row">
+                    <input id="geoipUrl" type="url" placeholder="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat">
+                    <button id="updateGeoip" class="primary">Обновить GeoIP</button>
+                  </div>
+                  <div class="preset-row" style="margin-top:8px">
+                    <span>Пресеты:</span>
+                    <button id="presetGeoipLoyal" type="button">Loyalsoldier</button>
+                    <button id="presetGeoipRunet" type="button">RunetFreedom</button>
+                  </div>
+                </div>
+                <div id="geoipLocalBox" hidden>
+                  <label for="geoipPath">Локальный путь к файлу</label>
+                  <div class="row">
+                    <input id="geoipPath" placeholder="C:\path\to\geoip.dat">
+                    <button id="pickGeoipFile" type="button">Выбрать файл…</button>
+                    <button id="inspectGeoip" type="button">Проверить</button>
+                  </div>
+                  <input id="geoipFileInput" type="file" accept=".dat,.srs,.json" hidden>
+                </div>
+                <p id="geoipMeta" class="geo-meta">Источник не выбран.</p>
+              </div>
+
+              <div class="geo-card">
+                <h3>Geosite / Geodata (категории доменов)</h3>
+                <label for="geositeSourceType">Источник</label>
+                <select id="geositeSourceType">
+                  <option value="none">Не используется</option>
+                  <option value="remote">Удалённый URL (HTTPS)</option>
+                  <option value="local">Локальный файл (.dat / .srs / .json)</option>
+                </select>
+                <div id="geositeRemoteBox" hidden>
+                  <label for="geositeUrl">Ссылка на geosite.dat / .srs</label>
+                  <div class="row">
+                    <input id="geositeUrl" type="url" placeholder="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat">
+                    <button id="updateGeosite" class="primary">Обновить Geodata</button>
+                  </div>
+                  <div class="preset-row" style="margin-top:8px">
+                    <span>Пресеты:</span>
+                    <button id="presetGeositeLoyal" type="button">Loyalsoldier</button>
+                    <button id="presetGeositeRunet" type="button">RunetFreedom</button>
+                  </div>
+                </div>
+                <div id="geositeLocalBox" hidden>
+                  <label for="geositePath">Локальный путь к файлу</label>
+                  <div class="row">
+                    <input id="geositePath" placeholder="C:\path\to\geosite.dat">
+                    <button id="pickGeositeFile" type="button">Выбрать файл…</button>
+                    <button id="inspectGeosite" type="button">Проверить</button>
+                  </div>
+                  <input id="geositeFileInput" type="file" accept=".dat,.srs,.json" hidden>
+                </div>
+                <p id="geositeMeta" class="geo-meta">Источник не выбран.</p>
+              </div>
+            </div>
+
+            <label class="check"><input type="checkbox" id="geoUpdateViaProxy">Скачивать удалённые базы GeoIP / Geodata / Rule-Sets через активный VPN (когда подключение запущено).</label>
+
+            <h3 style="margin:22px 0 8px">Дополнительные Rule-Sets (.srs / .json)</h3>
+            <p class="fine">Подходит для отдельных списков sing-box <code>.srs</code> (binary) или <code>.json</code> (source), подключаемых по своему тегу в правиле типа <code>Rule-Set по тегу</code>.</p>
+            <div id="ruleSetsList" class="list"></div>
+            <div class="columns" style="margin-top:12px">
+              <div>
+                <label for="rsTag">Тег Rule-Set</label>
+                <input id="rsTag" maxlength="64" placeholder="ru-blocked">
+              </div>
+              <div>
+                <label for="rsSourceType">Источник</label>
+                <select id="rsSourceType">
+                  <option value="remote">Удалённый URL (HTTPS)</option>
+                  <option value="local">Локальный файл (.srs / .json)</option>
+                </select>
+              </div>
+            </div>
+            <div class="columns">
+              <div>
+                <label for="rsFormat">Формат файла</label>
+                <select id="rsFormat">
+                  <option value="binary">Бинарный (.srs)</option>
+                  <option value="source">Исходный JSON (.json)</option>
+                </select>
+              </div>
+              <div id="rsRemoteBox">
+                <label for="rsUrl">HTTPS-ссылка на .srs / .json</label>
+                <input id="rsUrl" type="url" placeholder="https://example.com/ru-blocked.srs">
+              </div>
+              <div id="rsLocalBox" hidden>
+                <label for="rsPath">Локальный путь к .srs / .json</label>
+                <div class="row">
+                  <input id="rsPath" placeholder="C:\path\to\ru-blocked.srs">
+                  <button id="pickRsFile" type="button">Выбрать файл…</button>
+                </div>
+                <input id="rsFileInput" type="file" accept=".srs,.json" hidden>
+              </div>
+            </div>
+            <div class="actions">
+              <button id="addRuleSet" type="button">Добавить Rule-Set</button>
+            </div>
+            <p class="fine" style="margin-top:14px">Совет по DNS: при использовании IP-правил (<code>geoip</code> / <code>cidr</code>) домены, не совпавшие с доменными правилами выше, разрешаются до проверки IP; для защиты DNS от подмены выберите DoH во вкладке «Сеть и защита» или ставьте правила <code>geosite</code> / доменные правила выше <code>geoip</code>.</p>
+            <div class="savebar">
+              <p id="geoSaveNote" class="fine">После изменения источников или добавления Rule-Set сохраните маршруты.</p>
+              <button id="saveGeoRouting" class="primary">Сохранить базы и маршруты</button>
+            </div>
+          </div>
+
           <div class="panel">
             <h2>Проверить маршрут</h2>
             <p class="fine">Проверяется сохранённая конфигурация, без сетевого запроса. При отключённом VPN все маршруты временно не действуют.</p>

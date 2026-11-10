@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -375,6 +377,191 @@ class SingBoxBinaryCheckTests(unittest.TestCase):
                 with self.subTest(profile=name):
                     cfg = host.build_config(outbound, settings)
                     h.validate_config(cfg)
+
+    @unittest.skipUnless(host.CORE.is_file(), "sing-box binary not present in native/bin")
+    def test_geo_dat_and_ruleset_with_sing_box_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            geo_dir = Path(tmp) / "files"
+            geo_dir.mkdir()
+            geoip_dat = geo_dir / "geoip.dat"
+            geosite_dat = geo_dir / "geosite.dat"
+            custom_json = geo_dir / "custom.json"
+            geoip_dat.write_bytes(build_sample_geoip_dat())
+            geosite_dat.write_bytes(build_sample_geosite_dat())
+            custom_json.write_text(json.dumps({"version": 2, "rules": [{"domain_suffix": ["custom.invalid"]}]}), encoding="utf-8")
+
+            h = host.Host(core=host.CORE, data=Path(tmp) / "data")
+            settings = {
+                "dnsMode": "doh",
+                "mode": "rules",
+                "defaultAction": "direct",
+                "geo": {
+                    "geoip": {"sourceType": "local", "path": str(geoip_dat)},
+                    "geosite": {"sourceType": "local", "path": str(geosite_dat)},
+                    "ruleSets": [{"id": "rs1", "tag": "custom-rs", "enabled": True, "sourceType": "local", "format": "source", "path": str(custom_json)}],
+                },
+                "rules": [
+                    {"kind": "geosite", "value": "ads", "action": "block", "enabled": True},
+                    {"kind": "geosite", "value": "youtube@!cn", "action": "proxy", "enabled": True},
+                    {"kind": "geoip", "value": "ru", "action": "direct", "enabled": True},
+                    {"kind": "cidr", "value": "198.51.100.0/24", "action": "proxy", "enabled": True},
+                    {"kind": "ruleset", "value": "custom-rs", "action": "proxy", "enabled": True},
+                ],
+            }
+            cfg = h.build_runtime_config(sample_vless_tls(), settings, compile_srs=True)
+            h.validate_config(cfg)
+
+
+def _pb_varint(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def _pb_field_bytes(num: int, data: bytes) -> bytes:
+    return _pb_varint((num << 3) | 2) + _pb_varint(len(data)) + data
+
+
+def _pb_field_varint(num: int, val: int) -> bytes:
+    return _pb_varint((num << 3) | 0) + _pb_varint(val)
+
+
+def build_sample_geoip_dat() -> bytes:
+    def cidr_msg(ip_str: str, prefix: int) -> bytes:
+        msg = _pb_field_bytes(1, ipaddress.ip_address(ip_str).packed)
+        if prefix:
+            msg += _pb_field_varint(2, prefix)
+        return msg
+
+    ru_entry = _pb_field_bytes(1, b"RU") + _pb_field_bytes(2, cidr_msg("77.88.55.0", 24)) + _pb_field_bytes(2, cidr_msg("2a02:6b8::", 32))
+    cf_entry = _pb_field_bytes(1, b"CLOUDFLARE") + _pb_field_bytes(2, cidr_msg("1.1.1.0", 24))
+    return _pb_field_bytes(1, ru_entry) + _pb_field_bytes(1, cf_entry)
+
+
+def build_sample_geosite_dat() -> bytes:
+    def dom_msg(kind: int, val: str, attrs=()) -> bytes:
+        m = b""
+        if kind:
+            m += _pb_field_varint(1, kind)
+        m += _pb_field_bytes(2, val.encode("utf-8"))
+        for a in attrs:
+            m += _pb_field_bytes(3, _pb_field_bytes(1, a.encode("utf-8")))
+        return m
+
+    yt_entry = (
+        _pb_field_bytes(1, b"youtube")
+        + _pb_field_bytes(2, dom_msg(2, "youtube.com"))
+        + _pb_field_bytes(2, dom_msg(3, "m.youtube.com"))
+        + _pb_field_bytes(2, dom_msg(2, "youtube.cn", attrs=("cn",)))
+        + _pb_field_bytes(2, dom_msg(0, "ytimg"))
+    )
+    ads_entry = _pb_field_bytes(1, b"ads") + _pb_field_bytes(2, dom_msg(1, r"^ad\..*\.invalid$"))
+    return _pb_field_bytes(1, yt_entry) + _pb_field_bytes(1, ads_entry)
+
+
+class GeoRoutingTests(unittest.TestCase):
+    def test_dat_inspection_and_extraction_including_attributes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            geoip_dat = Path(tmp) / "geoip.dat"
+            geosite_dat = Path(tmp) / "geosite.dat"
+            geoip_dat.write_bytes(build_sample_geoip_dat())
+            geosite_dat.write_bytes(build_sample_geosite_dat())
+
+            gi_info = host.inspect_geo_file(geoip_dat, "geoip")
+            self.assertEqual(gi_info["format"], "dat")
+            self.assertEqual(gi_info["tagsCount"], 2)
+            self.assertEqual(gi_info["sampleTags"], ["cloudflare", "ru"])
+
+            cidrs = host.extract_geoip_tag_cidrs(geoip_dat, {"ru"})
+            self.assertEqual(cidrs["ru"], ["77.88.55.0/24", "2a02:6b8::/32"])
+
+            gs = host.extract_geosite_tag_rules(geosite_dat, {"youtube", "youtube@cn", "youtube@!cn", "ads"})
+            self.assertEqual(gs["youtube"]["domain_suffix"], ["youtube.com", "youtube.cn"])
+            self.assertEqual(gs["youtube"]["domain"], ["m.youtube.com"])
+            self.assertEqual(gs["youtube"]["domain_keyword"], ["ytimg"])
+            self.assertEqual(gs["youtube@cn"], {"domain_suffix": ["youtube.cn"]})
+            self.assertNotIn("youtube.cn", gs["youtube@!cn"].get("domain_suffix", []))
+            self.assertIn("youtube.com", gs["youtube@!cn"]["domain_suffix"])
+            self.assertEqual(gs["ads"]["domain_regex"], [r"^ad\..*\.invalid$"])
+
+    def test_prepare_geo_and_preserve_rule_order_with_resolve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = Path(tmp) / "files"
+            files.mkdir()
+            geoip_dat = files / "geoip.dat"
+            geosite_dat = files / "geosite.dat"
+            rs_json = files / "extra.json"
+            geoip_dat.write_bytes(build_sample_geoip_dat())
+            geosite_dat.write_bytes(build_sample_geosite_dat())
+            rs_json.write_text(json.dumps({"version": 2, "rules": [{"ip_cidr": ["203.0.113.0/24"]}]}), encoding="utf-8")
+
+            h = host.Host(core=Path(tmp) / "missing-core", data=Path(tmp) / "data")
+            settings = {
+                "dnsMode": "remote",
+                "mode": "rules",
+                "defaultAction": "direct",
+                "geo": {
+                    "geoip": {"sourceType": "local", "path": str(geoip_dat)},
+                    "geosite": {"sourceType": "local", "path": str(geosite_dat)},
+                    "ruleSets": [{"id": "r1", "tag": "extra", "enabled": True, "sourceType": "local", "format": "source", "path": str(rs_json)}],
+                },
+                "rules": [
+                    {"kind": "geosite", "value": "youtube@!cn", "action": "proxy", "enabled": True},
+                    {"kind": "geoip", "value": "ru", "action": "direct", "enabled": True},
+                    {"kind": "cidr", "value": "198.51.100.5", "action": "block", "enabled": True},
+                    {"kind": "ruleset", "value": "extra", "action": "proxy", "enabled": True},
+                ],
+            }
+            cfg = h.build_runtime_config(sample_vless_tls(), settings, compile_srs=False)
+            self.assertEqual([o["tag"] for o in cfg["outbounds"]], ["proxy", "direct"])
+            self.assertEqual(cfg["route"]["final"], "direct")
+            self.assertGreaterEqual(len(cfg["route"]["rule_set"]), 3)
+            # geosite rule must stay BEFORE resolve(bootstrap), while geoip/cidr/ruleset stay AFTER resolve.
+            rule_actions = [r.get("action") for r in cfg["route"]["rules"]]
+            self.assertEqual(rule_actions, ["route", "resolve", "route", "reject", "route"])
+            self.assertEqual(cfg["route"]["rules"][1], {"action": "resolve", "server": "bootstrap", "strategy": "prefer_ipv4"})
+            self.assertEqual(cfg["route"]["rules"][3], {"ip_cidr": ["198.51.100.5/32"], "action": "reject"})
+
+    def test_geo_errors_and_chunked_upload_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = host.Host(core=Path(tmp) / "missing-core", data=Path(tmp) / "data")
+            dat = build_sample_geoip_dat()
+            begin = h.geo_upload_begin({"target": "geoip", "fileName": "my-geoip.dat", "totalSize": len(dat)})
+            uid = begin["uploadId"]
+            mid = len(dat) // 2
+            h.geo_upload_chunk({"uploadId": uid, "data": base64.b64encode(dat[:mid]).decode("ascii")})
+            h.geo_upload_chunk({"uploadId": uid, "data": base64.b64encode(dat[mid:]).decode("ascii")})
+            info = h.geo_upload_finish({"uploadId": uid})
+            self.assertEqual(info["format"], "dat")
+            self.assertEqual(info["tagsCount"], 2)
+            self.assertTrue(Path(info["path"]).is_file())
+
+            # Un-downloaded remote GeoIP raises clear error when referenced by enabled rule.
+            with self.assertRaises(ValueError):
+                h.prepare_geo_rule_sets({
+                    "geo": {"geoip": {"sourceType": "remote", "url": "https://example.invalid/geoip.dat", "path": ""}},
+                    "rules": [{"kind": "geoip", "value": "ru", "action": "direct", "enabled": True}],
+                }, compile_srs=False)
+
+            # Missing tag raises clear error.
+            with self.assertRaises(ValueError):
+                h.prepare_geo_rule_sets({
+                    "geo": {"geoip": {"sourceType": "local", "path": info["path"]}},
+                    "rules": [{"kind": "geoip", "value": "nonexistent-country", "action": "direct", "enabled": True}],
+                }, compile_srs=False)
+
+            # Reject local/http download URLs.
+            with self.assertRaises(ValueError):
+                h.geo_update({"targets": ["geoip"], "geo": {"geoip": {"sourceType": "remote", "url": "https://127.0.0.1/geoip.dat"}}})
+            with self.assertRaises(ValueError):
+                h.geo_update({"targets": ["geoip"], "geo": {"geoip": {"sourceType": "remote", "url": "http://example.invalid/geoip.dat"}}})
 
 
 if __name__ == "__main__":

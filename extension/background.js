@@ -77,22 +77,26 @@ function native(command, payload = {}, timeout = 30000) {
     }
   });
 }
+function coreConfigSettings(s) {
+  return {
+    port: s.port,
+    logLevel: s.logLevel,
+    dnsMode: s.dnsMode,
+    dnsServer: s.dnsServer,
+    dnsServerName: s.dnsServerName,
+    dnsPath: s.dnsPath,
+    rules: s.rules,
+    mode: s.mode,
+    defaultAction: s.defaultAction,
+    geo: s.geo
+  };
+}
 function payload() {
   const profile = settings.profiles.find(p => p.id === settings.selectedId);
   if (!profile) throw new Error("Сначала добавьте и выберите профиль в настройках.");
   return {
     outbound: profile.outbound,
-    settings: {
-      port: settings.port,
-      logLevel: settings.logLevel,
-      dnsMode: settings.dnsMode,
-      dnsServer: settings.dnsServer,
-      dnsServerName: settings.dnsServerName,
-      dnsPath: settings.dnsPath,
-      rules: settings.rules,
-      mode: settings.mode,
-      defaultAction: settings.defaultAction
-    }
+    settings: coreConfigSettings(settings)
   };
 }
 async function privacy(active) {
@@ -163,15 +167,7 @@ function coreSignature(s) {
   const active = s.profiles.find(p => p.id === s.selectedId);
   return JSON.stringify({
     outbound: active ? active.outbound : null,
-    port: s.port,
-    logLevel: s.logLevel,
-    dnsMode: s.dnsMode,
-    dnsServer: s.dnsServer,
-    dnsServerName: s.dnsServerName,
-    dnsPath: s.dnsPath,
-    rules: s.rules,
-    mode: s.mode,
-    defaultAction: s.defaultAction
+    ...coreConfigSettings(s)
   });
 }
 async function save(value) {
@@ -301,10 +297,10 @@ function enqueue(fn) {
 
 function decideProxy(details) {
   if (!wanted) return { type: "direct" };
-  const action = FoxTunnel.actionFor(details.url, settings);
+  const action = FoxTunnel.routePolicy(details.url, settings);
   if (action === "direct") return { type: "direct" };
   if (action === "block" || (!running && settings.killSwitch)) {
-    // No DIRECT fallback. The core also enforces the saved domain block rules.
+    // No DIRECT fallback. The core also enforces the saved block/geo rules.
     return { type: "socks", host: "127.0.0.1", port: settings.port, proxyDNS: true };
   }
   if (!running) return { type: "direct" };
@@ -312,8 +308,8 @@ function decideProxy(details) {
 }
 function decideBeforeRequest(details) {
   if (!wanted) return {};
-  const action = FoxTunnel.actionFor(details.url, settings);
-  return { cancel: action === "block" || (action === "proxy" && !running && settings.killSwitch) };
+  const action = FoxTunnel.routePolicy(details.url, settings);
+  return { cancel: action === "block" || ((action === "proxy" || action === "core") && !running && settings.killSwitch) };
 }
 
 // Registered before loading storage to avoid a direct-connect startup window.
@@ -333,11 +329,28 @@ browser.proxy.onError.addListener(error => {
   announce();
 });
 
+function mergeGeoMeta(src, info, overrides = {}) {
+  return {
+    ...src,
+    ...overrides,
+    path: info.path,
+    fileName: info.fileName || src.fileName || "",
+    format: info.format || src.format || "",
+    updatedAt: info.updatedAt || new Date().toISOString(),
+    size: info.size || 0,
+    tagsCount: Number.isInteger(info.tagsCount) ? info.tagsCount : (src.tagsCount || 0),
+    sampleTags: Array.isArray(info.sampleTags) ? info.sampleTags : (src.sampleTags || [])
+  };
+}
+
 browser.runtime.onMessage.addListener(message => {
   if (!message || message.type === "stateChanged") return undefined;
   return ready.then(() => {
     if (message.type === "getState") return { ok: true, result: snapshot() };
-    if (message.type === "routePreview") return { ok: true, result: FoxTunnel.actionFor(message.url, settings) };
+    if (message.type === "routePreview") {
+      const targetSettings = message.settings ? FoxTunnel.validateSettings({ ...settings, ...message.settings }) : settings;
+      return { ok: true, result: FoxTunnel.routePolicy(message.url, targetSettings) };
+    }
     return enqueue(async () => {
       try {
         let result;
@@ -366,14 +379,7 @@ browser.runtime.onMessage.addListener(message => {
         else if (message.type === "checkProfile") {
           result = await native("check", {
             outbound: message.outbound,
-            settings: {
-              port: settings.port,
-              logLevel: settings.logLevel,
-              dnsMode: settings.dnsMode,
-              dnsServer: settings.dnsServer,
-              dnsServerName: settings.dnsServerName,
-              dnsPath: settings.dnsPath
-            }
+            settings: coreConfigSettings(settings)
           });
         } else if (message.type === "probeProfile") {
           result = await native("probe", {
@@ -458,10 +464,60 @@ browser.runtime.onMessage.addListener(message => {
             profiles: nextProfiles,
             selectedId: nextSelected
           });
+        } else if (message.type === "geoStatus") {
+          result = await native("geo_status", { geo: message.geo || settings.geo }, 10000);
+        } else if (message.type === "geoInspect") {
+          result = await native("geo_inspect", { path: message.path, target: message.target || "" }, 15000);
+        } else if (message.type === "geoUpdate") {
+          const validatedGeo = FoxTunnel.validateGeoSettings(message.geo || settings.geo);
+          const res = await native("geo_update", {
+            targets: message.targets,
+            ruleSetIds: message.ruleSetIds || [],
+            geo: validatedGeo
+          }, 65000);
+          const nextGeo = structuredClone(settings.geo);
+          nextGeo.updateViaProxy = validatedGeo.updateViaProxy;
+          if (res.geoip) nextGeo.geoip = mergeGeoMeta(validatedGeo.geoip, res.geoip);
+          if (res.geosite) nextGeo.geosite = mergeGeoMeta(validatedGeo.geosite, res.geosite);
+          if (res.ruleSets && typeof res.ruleSets === "object") {
+            const byId = new Map(nextGeo.ruleSets.map(r => [r.id, r]));
+            for (const rs of validatedGeo.ruleSets) {
+              if (res.ruleSets[rs.id]) {
+                byId.set(rs.id, mergeGeoMeta(rs, res.ruleSets[rs.id], { format: res.ruleSets[rs.id].format === "json" ? "source" : "binary" }));
+              }
+            }
+            nextGeo.ruleSets = Array.from(byId.values());
+          }
+          await save({ ...settings, geo: nextGeo });
+          result = { ...res, geo: settings.geo, state: snapshot() };
+        } else if (message.type === "geoUploadBegin") {
+          result = await native("geo_upload_begin", {
+            target: message.target,
+            fileName: message.fileName,
+            totalSize: message.totalSize,
+            ruleSetId: message.ruleSetId || ""
+          }, 15000);
+        } else if (message.type === "geoUploadChunk") {
+          result = await native("geo_upload_chunk", {
+            uploadId: message.uploadId,
+            data: message.data
+          }, 15000);
+        } else if (message.type === "geoUploadFinish") {
+          const info = await native("geo_upload_finish", { uploadId: message.uploadId }, 30000);
+          if (message.autoSave && (message.target === "geoip" || message.target === "geosite")) {
+            const nextGeo = structuredClone(settings.geo);
+            nextGeo[message.target] = mergeGeoMeta(nextGeo[message.target], info, { sourceType: "local" });
+            await save({ ...settings, geo: nextGeo });
+          }
+          result = { info, geo: settings.geo, state: snapshot() };
         } else throw new Error("Неизвестная команда расширения.");
         return { ok: true, result };
       } catch (e) {
-        if (!["checkProfile", "probeProfile", "addSubscription", "refreshSubscription", "refreshAllSubscriptions", "renameSubscription", "deleteSubscription"].includes(message.type)) {
+        if (![
+          "checkProfile", "probeProfile", "addSubscription", "refreshSubscription",
+          "refreshAllSubscriptions", "renameSubscription", "deleteSubscription",
+          "geoStatus", "geoInspect", "geoUpdate", "geoUploadBegin", "geoUploadChunk", "geoUploadFinish"
+        ].includes(message.type)) {
           lastError = e.message;
           announce();
         }
