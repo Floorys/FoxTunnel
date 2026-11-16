@@ -47,12 +47,7 @@ const securityFields = [
   "theme", "probeUrl", "dnsMode", "dnsServer", "dnsServerName", "dnsPath"
 ];
 
-function formatBytes(n) {
-  if (!n || n < 0) return "";
-  if (n < 1024) return `${n} Б`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} КБ`;
-  return `${(n / (1024 * 1024)).toFixed(2)} МБ`;
-}
+const formatBytes = FoxTunnel.formatBytes;
 function formatIsoShort(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -171,13 +166,6 @@ async function runSingleProbe(profile) {
     });
   }
   renderProfiles();
-}
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes < 0) return "";
-  const gb = bytes / (1024 ** 3);
-  if (gb >= 1) return `${gb.toFixed(gb >= 100 ? 0 : 1)} ГБ`;
-  const mb = bytes / (1024 ** 2);
-  return `${mb.toFixed(0)} МБ`;
 }
 function formatSubInfo(info) {
   if (!info) return "";
@@ -347,6 +335,7 @@ function renderRules() {
       r.enabled = enabled.checked;
       dirtyRouting = true;
       updateDirtyIndicators();
+      renderRules();
     });
     const info = document.createElement("div");
     info.className = "info";

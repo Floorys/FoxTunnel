@@ -273,19 +273,46 @@ async function refreshAllSubs(onlyStale = false) {
     .map(s => s.id);
   let updated = 0;
   const errors = [];
+  let nextSubs = structuredClone(settings.subscriptions);
+  let nextProfiles = structuredClone(settings.profiles);
+  let nextSelectedId = settings.selectedId;
+
   for (const id of ids) {
-    const sub = settings.subscriptions.find(s => s.id === id);
-    if (!sub) continue;
+    const index = nextSubs.findIndex(s => s.id === id);
+    if (index < 0) continue;
+    const target = nextSubs[index];
     try {
-      await applySubscriptionRefresh(id);
+      const fetched = await fetchSubscriptionPayload(target.url);
+      const host = safeSubHost(target.url);
+      const nextName = (target.name === host && fetched.title) ? fetched.title : target.name;
+      nextSubs[index] = {
+        ...target,
+        name: nextName,
+        updatedAt: new Date().toISOString(),
+        info: fetched.info
+      };
+      const merged = FoxTunnel.mergeSubscriptionProfiles(nextProfiles, target.id, fetched.profiles, nextSelectedId);
+      nextProfiles = merged.profiles;
+      nextSelectedId = merged.selectedId;
       updated++;
+      record(`Подписка «${nextName}» обновлена (${merged.count} серв.).`);
     } catch (e) {
-      const msg = `${sub.name}: ${e.message}`;
+      const msg = `${target.name}: ${e.message}`;
       errors.push(msg);
-      record(`Ошибка обновления подписки «${sub.name}»: ${e.message}`);
+      record(`Ошибка обновления подписки «${target.name}»: ${e.message}`);
     }
   }
-  announce();
+
+  if (updated > 0) {
+    await save({
+      ...settings,
+      subscriptions: nextSubs,
+      profiles: nextProfiles,
+      selectedId: nextSelectedId
+    });
+  } else {
+    announce();
+  }
   return { updated, total: ids.length, errors, state: snapshot() };
 }
 

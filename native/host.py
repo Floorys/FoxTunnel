@@ -278,9 +278,9 @@ def extract_geoip_tag_cidrs(dat_path: Path, tags: set[str]) -> dict[str, list[st
     found: dict[str, list[str]] = {}
     if not needed:
         return found
-    raw = dat_path.read_bytes()
-    if len(raw) > GEO_MAX_BYTES:
+    if dat_path.stat().st_size > GEO_MAX_BYTES:
         raise ValueError("Файл geoip.dat превышает допустимый размер 64 МБ.")
+    raw = dat_path.read_bytes()
     mv = memoryview(raw)
     for field_num, wire_type, val in _iter_pb_fields(mv):
         if field_num == 1 and wire_type == 2:
@@ -298,9 +298,9 @@ def extract_geosite_tag_rules(dat_path: Path, full_tags: set[str]) -> dict[str, 
         by_base.setdefault(base, []).append((low, attr or None))
     if not by_base:
         return {}
-    raw = dat_path.read_bytes()
-    if len(raw) > GEO_MAX_BYTES:
+    if dat_path.stat().st_size > GEO_MAX_BYTES:
         raise ValueError("Файл geosite.dat превышает допустимый размер 64 МБ.")
+    raw = dat_path.read_bytes()
     mv = memoryview(raw)
     base_entries: dict[str, list[tuple[int, str, frozenset[str]]]] = {}
     for field_num, wire_type, val in _iter_pb_fields(mv):
@@ -710,8 +710,10 @@ class Host:
         for stale in self.data.glob("config-*.json"):
             if stale != self.config_path:
                 _secure_unlink(stale)
+        active_tmp = {sess["tmp_path"] for sess in getattr(self, "uploads", {}).values() if "tmp_path" in sess}
         for stale in self.geo_dir.glob("*.tmp"):
-            _secure_unlink(stale)
+            if stale not in active_tmp:
+                _secure_unlink(stale)
 
     def version(self):
         if not self.core.is_file():
@@ -792,7 +794,9 @@ class Host:
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
                 if os.name == "nt":
-                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                    exclusive_flag = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+                    if exclusive_flag is not None:
+                        probe.setsockopt(socket.SOL_SOCKET, exclusive_flag, 1)
                 try:
                     probe.bind(("127.0.0.1", port_num))
                     return
@@ -1055,11 +1059,10 @@ class Host:
                     # Verify an actual SOCKS5 handshake, not only an open TCP port.
                     with socket.create_connection(("127.0.0.1", self.port), timeout=0.3) as conn:
                         conn.sendall(b"\x05\x01\x00")
-                        with conn.makefile("rb") as sock_file:
-                            if read_exact(sock_file, 2) == b"\x05\x00":
-                                time.sleep(0.1)
-                                if self.process.poll() is None:
-                                    return self.status()
+                        if recv_exact(conn, 2) == b"\x05\x00":
+                            time.sleep(0.1)
+                            if self.process.poll() is None:
+                                return self.status()
                 except (OSError, EOFError):
                     pass
                 time.sleep(0.1)
@@ -1681,7 +1684,7 @@ def https_download_to_file(
             if resp.status != 200:
                 raise RuntimeError(f"Сервер ответил HTTP {resp.status}.")
             cl_hdr = resp.getheader("Content-Length")
-            if cl_hdr and cl_hdr.isdigit() and int(cl_hdr) > max_bytes:
+            if cl_hdr and cl_hdr.strip().isdigit() and int(cl_hdr.strip()) > max_bytes:
                 raise ValueError("Размер удалённого файла превышает лимит 64 МБ.")
             total = 0
             with dest_path.open("wb") as out:

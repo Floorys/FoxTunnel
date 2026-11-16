@@ -676,6 +676,16 @@
     return u.href;
   }
 
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "";
+    if (bytes < 1024) return `${bytes} Б`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+    const mb = bytes / (1024 ** 2);
+    if (mb < 1000) return `${mb.toFixed(mb >= 100 ? 0 : 1)} МБ`;
+    const gb = bytes / (1024 ** 3);
+    return `${gb.toFixed(gb >= 100 ? 0 : 1)} ГБ`;
+  }
+
   function maskSubscriptionUrl(rawUrl) {
     try {
       const u = new URL(rawUrl);
@@ -862,7 +872,7 @@
 
   root.FoxTunnel = {
     TYPES, defaults, DEFAULT_GEO_SOURCE, CORE_RULE_KINDS, decode64, parseLink, parseSubscription, validateOutbound,
-    validateSettings, validateProbeUrl, validateSubscriptionUrl, maskSubscriptionUrl,
+    validateSettings, validateProbeUrl, validateSubscriptionUrl, maskSubscriptionUrl, formatBytes,
     parseSubscriptionHeaders, mergeSubscriptionProfiles,
     normalizeRule, normalizeDomain, normalizeCidr, normalizeGeoTag,
     validateGeoUrl, validateGeoPath, validateGeoSource, validateRuleSetEntry, validateGeoSettings,

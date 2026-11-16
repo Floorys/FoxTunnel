@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "native"))
@@ -562,6 +563,38 @@ class GeoRoutingTests(unittest.TestCase):
                 h.geo_update({"targets": ["geoip"], "geo": {"geoip": {"sourceType": "remote", "url": "https://127.0.0.1/geoip.dat"}}})
             with self.assertRaises(ValueError):
                 h.geo_update({"targets": ["geoip"], "geo": {"geoip": {"sourceType": "remote", "url": "http://example.invalid/geoip.dat"}}})
+
+    def test_cleanup_preserves_in_flight_uploads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = host.Host(core=Path(tmp) / "missing-core", data=Path(tmp) / "data")
+            dat = build_sample_geoip_dat()
+            begin = h.geo_upload_begin({"target": "geoip", "fileName": "my-geoip.dat", "totalSize": len(dat)})
+            uid = begin["uploadId"]
+            active_tmp = h.uploads[uid]["tmp_path"]
+            self.assertTrue(active_tmp.is_file())
+
+            stale_tmp = h.geo_dir / "stale-upload.tmp"
+            stale_tmp.write_bytes(b"old")
+            self.assertTrue(stale_tmp.is_file())
+
+            h.cleanup_stale_configs()
+            self.assertTrue(active_tmp.is_file(), "Active upload temp file must not be deleted")
+            self.assertFalse(stale_tmp.is_file(), "Stale temp file must be cleaned up")
+
+            h.geo_upload_abort(uid)
+            self.assertFalse(active_tmp.is_file())
+
+    def test_extract_oversized_file_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_dat = Path(tmp) / "huge.dat"
+            fake_dat.write_bytes(b"x")
+            class MockStat:
+                st_size = host.GEO_MAX_BYTES + 1
+            with mock.patch("pathlib.Path.stat", return_value=MockStat()):
+                with self.assertRaises(ValueError):
+                    host.extract_geoip_tag_cidrs(fake_dat, {"ru"})
+                with self.assertRaises(ValueError):
+                    host.extract_geosite_tag_rules(fake_dat, {"youtube"})
 
 
 if __name__ == "__main__":

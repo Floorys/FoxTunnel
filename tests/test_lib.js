@@ -268,4 +268,15 @@ test("geo routing: cidr, geoip, geosite, ruleset normalization, policy order, an
   assert.deepEqual(legacy.geo.ruleSets, []);
 });
 
+test("formatBytes helper handles edge cases, small files, and quotas", () => {
+  assert.equal(FoxTunnel.formatBytes(0), "");
+  assert.equal(FoxTunnel.formatBytes(-10), "");
+  assert.equal(FoxTunnel.formatBytes(500), "500 Б");
+  assert.equal(FoxTunnel.formatBytes(153600), "150.0 КБ");
+  assert.equal(FoxTunnel.formatBytes(2621440), "2.5 МБ");
+  assert.equal(FoxTunnel.formatBytes(150 * 1024 * 1024), "150 МБ");
+  assert.equal(FoxTunnel.formatBytes(1.5 * 1024 ** 3), "1.5 ГБ");
+  assert.equal(FoxTunnel.formatBytes(150 * 1024 ** 3), "150 ГБ");
+});
+
 
