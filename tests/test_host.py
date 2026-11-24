@@ -596,6 +596,37 @@ class GeoRoutingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     host.extract_geosite_tag_rules(fake_dat, {"youtube"})
 
+    def test_https_download_rejects_oversized_content_length_with_spaces(self):
+        class FakeResponse:
+            status = 200
+
+            def getheader(self, name):
+                if name.lower() == "content-length":
+                    return f" {host.GEO_MAX_BYTES + 1} "
+                return None
+
+            def read(self, _n):
+                raise AssertionError("Body must not be read when Content-Length exceeds limit")
+
+        class FakeConn:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse()
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "geo.dat"
+            with mock.patch.object(host, "_Socks5HTTPSConnection", FakeConn):
+                with self.assertRaises(ValueError):
+                    host.https_download_to_file("https://example.invalid/geoip.dat", dest)
+
 
 if __name__ == "__main__":
     unittest.main()

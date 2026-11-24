@@ -171,7 +171,7 @@ function formatSubInfo(info) {
   if (!info) return "";
   const parts = [];
   const used = (info.upload || 0) + (info.download || 0);
-  if (info.total > 0) parts.push(`${formatBytes(used)} / ${formatBytes(info.total)}`);
+  if (info.total > 0) parts.push(`${formatBytes(used) || "0 Б"} / ${formatBytes(info.total)}`);
   else if (used > 0) parts.push(`использовано ${formatBytes(used)}`);
   if (info.expire > 0) {
     const dt = new Date(info.expire * 1000);
@@ -324,6 +324,10 @@ function renderRules() {
   if (!routingRules.length) {
     list.append(empty("Нет правил. В режиме «По правилам» без правил весь трафик идёт напрямую: добавьте правило с действием «VPN» и сохраните, либо выберите режим «Весь веб-трафик»."));
   }
+  const ruleSubText = r => {
+    const issue = r.enabled ? geoSourceIssue(r) : "";
+    return `${labels[r.kind] || r.kind} → ${labels[r.action]}${issue ? ` · ⚠ ${issue}` : ""}`;
+  };
   routingRules.forEach((r, i) => {
     const item = document.createElement("div");
     item.className = "list-item";
@@ -331,19 +335,18 @@ function renderRules() {
     enabled.type = "checkbox";
     enabled.checked = r.enabled;
     enabled.setAttribute("aria-label", `Включить правило ${r.value}`);
-    enabled.addEventListener("change", () => {
-      r.enabled = enabled.checked;
-      dirtyRouting = true;
-      updateDirtyIndicators();
-      renderRules();
-    });
     const info = document.createElement("div");
     info.className = "info";
     const name = document.createElement("strong");
     name.textContent = `${i + 1}. ${r.value}`;
     const sub = document.createElement("small");
-    const issue = r.enabled ? geoSourceIssue(r) : "";
-    sub.textContent = `${labels[r.kind] || r.kind} → ${labels[r.action]}${issue ? ` · ⚠ ${issue}` : ""}`;
+    sub.textContent = ruleSubText(r);
+    enabled.addEventListener("change", () => {
+      r.enabled = enabled.checked;
+      dirtyRouting = true;
+      updateDirtyIndicators();
+      sub.textContent = ruleSubText(r);
+    });
     info.append(name, sub);
     item.append(enabled, info);
     const move = direction => {

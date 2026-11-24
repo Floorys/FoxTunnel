@@ -238,12 +238,11 @@ async function fetchSubscriptionPayload(rawUrl) {
   }
 }
 
-async function applySubscriptionRefresh(subId) {
-  const index = settings.subscriptions.findIndex(s => s.id === subId);
+async function refreshSubscriptionInDraft(nextSubs, nextProfiles, nextSelectedId, subId) {
+  const index = nextSubs.findIndex(s => s.id === subId);
   if (index < 0) throw new Error("Подписка не найдена.");
-  const target = settings.subscriptions[index];
+  const target = nextSubs[index];
   const fetched = await fetchSubscriptionPayload(target.url);
-  const nextSubs = structuredClone(settings.subscriptions);
   const host = safeSubHost(target.url);
   const nextName = (target.name === host && fetched.title) ? fetched.title : target.name;
   nextSubs[index] = {
@@ -252,15 +251,21 @@ async function applySubscriptionRefresh(subId) {
     updatedAt: new Date().toISOString(),
     info: fetched.info
   };
-  const merged = FoxTunnel.mergeSubscriptionProfiles(settings.profiles, target.id, fetched.profiles, settings.selectedId);
+  const merged = FoxTunnel.mergeSubscriptionProfiles(nextProfiles, target.id, fetched.profiles, nextSelectedId);
+  return { name: nextName, count: merged.count, profiles: merged.profiles, selectedId: merged.selectedId };
+}
+
+async function applySubscriptionRefresh(subId) {
+  const nextSubs = structuredClone(settings.subscriptions);
+  const refreshed = await refreshSubscriptionInDraft(nextSubs, settings.profiles, settings.selectedId, subId);
   await save({
     ...settings,
     subscriptions: nextSubs,
-    profiles: merged.profiles,
-    selectedId: merged.selectedId
+    profiles: refreshed.profiles,
+    selectedId: refreshed.selectedId
   });
-  record(`Подписка «${nextName}» обновлена (${merged.count} серв.).`);
-  return { count: merged.count, name: nextName, state: snapshot() };
+  record(`Подписка «${refreshed.name}» обновлена (${refreshed.count} серв.).`);
+  return { count: refreshed.count, name: refreshed.name, state: snapshot() };
 }
 
 async function refreshAllSubs(onlyStale = false) {
@@ -273,29 +278,20 @@ async function refreshAllSubs(onlyStale = false) {
     .map(s => s.id);
   let updated = 0;
   const errors = [];
-  let nextSubs = structuredClone(settings.subscriptions);
+  const updatedLogs = [];
+  const nextSubs = structuredClone(settings.subscriptions);
   let nextProfiles = structuredClone(settings.profiles);
   let nextSelectedId = settings.selectedId;
 
   for (const id of ids) {
-    const index = nextSubs.findIndex(s => s.id === id);
-    if (index < 0) continue;
-    const target = nextSubs[index];
+    const target = nextSubs.find(s => s.id === id);
+    if (!target) continue;
     try {
-      const fetched = await fetchSubscriptionPayload(target.url);
-      const host = safeSubHost(target.url);
-      const nextName = (target.name === host && fetched.title) ? fetched.title : target.name;
-      nextSubs[index] = {
-        ...target,
-        name: nextName,
-        updatedAt: new Date().toISOString(),
-        info: fetched.info
-      };
-      const merged = FoxTunnel.mergeSubscriptionProfiles(nextProfiles, target.id, fetched.profiles, nextSelectedId);
-      nextProfiles = merged.profiles;
-      nextSelectedId = merged.selectedId;
+      const refreshed = await refreshSubscriptionInDraft(nextSubs, nextProfiles, nextSelectedId, id);
+      nextProfiles = refreshed.profiles;
+      nextSelectedId = refreshed.selectedId;
       updated++;
-      record(`Подписка «${nextName}» обновлена (${merged.count} серв.).`);
+      updatedLogs.push(`Подписка «${refreshed.name}» обновлена (${refreshed.count} серв.).`);
     } catch (e) {
       const msg = `${target.name}: ${e.message}`;
       errors.push(msg);
@@ -310,6 +306,8 @@ async function refreshAllSubs(onlyStale = false) {
       profiles: nextProfiles,
       selectedId: nextSelectedId
     });
+    for (const line of updatedLogs) record(line);
+    announce();
   } else {
     announce();
   }

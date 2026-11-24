@@ -710,7 +710,7 @@ class Host:
         for stale in self.data.glob("config-*.json"):
             if stale != self.config_path:
                 _secure_unlink(stale)
-        active_tmp = {sess["tmp_path"] for sess in getattr(self, "uploads", {}).values() if "tmp_path" in sess}
+        active_tmp = {sess["tmp_path"] for sess in self.uploads.values()}
         for stale in self.geo_dir.glob("*.tmp"):
             if stale not in active_tmp:
                 _secure_unlink(stale)
