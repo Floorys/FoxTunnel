@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "FoxTunnel",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Клиент sing-box для Firefox: VLESS, VMess, Hysteria2 и маршрутизация по доменам, CIDR, GeoIP и Geosite.",
   "browser_specific_settings": {
     "gecko": {
